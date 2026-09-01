@@ -103,6 +103,30 @@ class DatabaseService {
     return maps.isNotEmpty;
   }
 
+  /// Retrieves all unsynced messages (synced = 0) sorted by timestamp ascending.
+  Future<List<MessageModel>> getUnsyncedMessages() async {
+    final db = await database;
+    final maps = await db.query(
+      'messages',
+      where: 'synced = ?',
+      whereArgs: [0],
+      orderBy: 'timestamp ASC',
+    );
+
+    return maps.map((map) => MessageModel.fromMap(map)).toList();
+  }
+
+  /// Updates a message's synced status to 1 (synced).
+  Future<int> markMessageSynced(String id) async {
+    final db = await database;
+    return await db.update(
+      'messages',
+      {'synced': 1},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
   /// Clean up database connections (useful for testing or hot restarts).
   Future<void> close() async {
     final db = _database;

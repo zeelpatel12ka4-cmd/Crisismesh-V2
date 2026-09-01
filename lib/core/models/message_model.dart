@@ -75,6 +75,29 @@ class MessageModel {
     };
   }
 
+  /// Convert a MessageModel to a Firestore-compatible Map for Cloud Bridge sync.
+  Map<String, dynamic> toFirestoreMap({String? bridgeDeviceId}) {
+    return {
+      'id': id,
+      'type': type,
+      'sender_id': senderId,
+      'recipient_id': recipientId,
+      'group_id': groupId,
+      'payload': payload,
+      'need_type': needType,
+      'lat': lat,
+      'lng': lng,
+      'timestamp': timestamp,
+      'hop_count': hopCount,
+      'priority_tier': priorityTier,
+      'priority_score': priorityScore,
+      'signature': signature,
+      'synced': true,
+      'synced_at': DateTime.now().millisecondsSinceEpoch,
+      'bridge_device_id': bridgeDeviceId,
+    };
+  }
+
   /// Create a copy of MessageModel with modified fields.
   MessageModel copyWith({
     String? id,
