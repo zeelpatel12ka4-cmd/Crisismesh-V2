@@ -1,3 +1,38 @@
+/// Local delivery lifecycle states for Bluetooth Mesh transmission (Phase 5A)
+class MeshDeliveryStatus {
+  static const String pending = 'pending';
+  static const String sending = 'sending';
+  static const String transmittedToPeer = 'transmitted_to_peer';
+
+  static const List<String> all = [pending, sending, transmittedToPeer];
+
+  static String format(String status) {
+    switch (status) {
+      case pending:
+        return 'Pending — waiting for nearby device';
+      case sending:
+        return 'Sending...';
+      case transmittedToPeer:
+        return 'Sent via mesh';
+      default:
+        return status;
+    }
+  }
+
+  static String badgeText(String status) {
+    switch (status) {
+      case pending:
+        return 'Waiting for device';
+      case sending:
+        return 'Sending...';
+      case transmittedToPeer:
+        return 'Sent via mesh';
+      default:
+        return status;
+    }
+  }
+}
+
 class MessageModel {
   final String id;
   final String type; // 'broadcast' or 'chat'
@@ -14,6 +49,7 @@ class MessageModel {
   final int priorityScore;
   final String? signature;
   final bool synced;
+  final String meshDeliveryStatus; // 'pending', 'sending', 'transmitted_to_peer'
 
   MessageModel({
     required this.id,
@@ -31,10 +67,19 @@ class MessageModel {
     required this.priorityScore,
     this.signature,
     this.synced = false,
+    this.meshDeliveryStatus = MeshDeliveryStatus.transmittedToPeer,
   });
 
   /// Create a MessageModel from a database Map.
   factory MessageModel.fromMap(Map<String, dynamic> map) {
+    final hop = map['hop_count'] != null ? (map['hop_count'] as num).toInt() : 0;
+    final isSynced = (map['synced'] == 1 || map['synced'] == true);
+    final rawMeshStatus = map['mesh_delivery_status'] as String?;
+
+    final parsedMeshStatus = rawMeshStatus != null && MeshDeliveryStatus.all.contains(rawMeshStatus)
+        ? rawMeshStatus
+        : (isSynced || hop > 0 ? MeshDeliveryStatus.transmittedToPeer : MeshDeliveryStatus.pending);
+
     return MessageModel(
       id: map['id'] as String,
       type: map['type'] as String,
@@ -45,12 +90,13 @@ class MessageModel {
       needType: map['need_type'] as String?,
       lat: map['lat'] != null ? (map['lat'] as num).toDouble() : null,
       lng: map['lng'] != null ? (map['lng'] as num).toDouble() : null,
-      timestamp: map['timestamp'] as int,
-      hopCount: map['hop_count'] as int,
-      priorityTier: map['priority_tier'] as String,
-      priorityScore: map['priority_score'] as int,
+      timestamp: map['timestamp'] != null ? (map['timestamp'] as num).toInt() : DateTime.now().millisecondsSinceEpoch,
+      hopCount: hop,
+      priorityTier: map['priority_tier'] as String? ?? 'Low',
+      priorityScore: map['priority_score'] != null ? (map['priority_score'] as num).toInt() : 1,
       signature: map['signature'] as String?,
-      synced: (map['synced'] as int) == 1,
+      synced: isSynced,
+      meshDeliveryStatus: parsedMeshStatus,
     );
   }
 
@@ -72,6 +118,7 @@ class MessageModel {
       'priority_score': priorityScore,
       'signature': signature,
       'synced': synced ? 1 : 0,
+      'mesh_delivery_status': meshDeliveryStatus,
     };
   }
 
@@ -95,6 +142,7 @@ class MessageModel {
       'synced': true,
       'synced_at': DateTime.now().millisecondsSinceEpoch,
       'bridge_device_id': bridgeDeviceId,
+      'mesh_delivery_status': meshDeliveryStatus,
     };
   }
 
@@ -115,6 +163,7 @@ class MessageModel {
     int? priorityScore,
     String? signature,
     bool? synced,
+    String? meshDeliveryStatus,
   }) {
     return MessageModel(
       id: id ?? this.id,
@@ -132,6 +181,12 @@ class MessageModel {
       priorityScore: priorityScore ?? this.priorityScore,
       signature: signature ?? this.signature,
       synced: synced ?? this.synced,
+      meshDeliveryStatus: meshDeliveryStatus ?? this.meshDeliveryStatus,
     );
   }
+
+  // --- Convenience Helpers ---
+  bool get isMeshPending => meshDeliveryStatus == MeshDeliveryStatus.pending;
+  bool get isMeshSending => meshDeliveryStatus == MeshDeliveryStatus.sending;
+  bool get isTransmittedToPeer => meshDeliveryStatus == MeshDeliveryStatus.transmittedToPeer;
 }

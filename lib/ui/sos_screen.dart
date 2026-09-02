@@ -53,10 +53,15 @@ class _SosScreenState extends State<SosScreen> {
     _fetchLocation();
 
     if (!kIsWeb) {
-      // Initialize MeshService for Phase 2 peer communication
+      // Initialize MeshService for Phase 2 & Phase 5A peer communication and store-and-forward
       MeshService.instance.init(
         localDeviceId: _deviceId,
         onMessageReceived: _handleIncomingMeshMessage,
+        onPeerConnected: (endpointId) async {
+          if (mounted) {
+            await _loadMessageHistory();
+          }
+        },
       );
       MeshService.instance.addListener(_onMeshStatusChanged);
       MeshService.instance.startMesh();
@@ -76,7 +81,10 @@ class _SosScreenState extends State<SosScreen> {
   }
 
   void _onMeshStatusChanged() {
-    if (mounted) setState(() {});
+    if (mounted) {
+      _loadMessageHistory();
+      setState(() {});
+    }
   }
 
   void _onSyncStatusChanged() {
@@ -277,6 +285,9 @@ class _SosScreenState extends State<SosScreen> {
       needType: _selectedCategory,
     );
 
+    final bool hasPeers = MeshService.instance.isConnected;
+    final initialMeshStatus = hasPeers ? MeshDeliveryStatus.sending : MeshDeliveryStatus.pending;
+
     final sosMessage = MessageModel(
       id: _uuid.v4(),
       type: 'broadcast',
@@ -290,14 +301,26 @@ class _SosScreenState extends State<SosScreen> {
       priorityTier: triageResult.tier,
       priorityScore: triageResult.score,
       synced: false,
+      meshDeliveryStatus: initialMeshStatus,
     );
 
-    // Save locally first and record as seen
+    // Save locally first to SQLite and record as seen
     await DatabaseService.instance.saveSeenMessageId(sosMessage.id);
     await DatabaseService.instance.saveMessage(sosMessage);
 
-    // Phase 2: Broadcast to connected peer(s) over Bluetooth mesh
-    final sentCount = await MeshService.instance.broadcastMessage(sosMessage);
+    // Phase 2 & 5A: Broadcast to connected peer(s) over Bluetooth mesh if available
+    int sentCount = 0;
+    if (hasPeers) {
+      sentCount = await MeshService.instance.broadcastMessage(sosMessage);
+      if (sentCount > 0) {
+        await DatabaseService.instance.markMessageMeshTransmitted(sosMessage.id);
+      } else {
+        await DatabaseService.instance.updateMeshDeliveryStatus(sosMessage.id, MeshDeliveryStatus.pending);
+      }
+    }
+
+    // Refresh local UI history
+    await _loadMessageHistory();
 
     // Phase 3: If device currently has internet, automatically sync to Firestore cloud
     SyncService.instance.checkConnectivityAndSync();
@@ -305,8 +328,8 @@ class _SosScreenState extends State<SosScreen> {
     // Clearly communicate local saving and peer transmission status
     if (mounted) {
       final String feedbackText = sentCount > 0
-          ? 'SOS SAVED LOCALLY • Relayed to $sentCount connected peer${sentCount == 1 ? "" : "s"}'
-          : 'SOS SAVED LOCALLY • Stored to database (will relay when peers connect)';
+          ? 'SOS SAVED LOCALLY • Transmitted to $sentCount connected peer${sentCount == 1 ? "" : "s"}'
+          : 'SOS SAVED LOCALLY • Stored to database (Pending — waiting for nearby device)';
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -1494,6 +1517,48 @@ class _SosScreenState extends State<SosScreen> {
                       ),
                     ),
                   ),
+
+                  // Phase 5A Mesh Delivery Status Badge (for locally generated broadcasts)
+                  if (msg.hopCount == 0)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: msg.isMeshPending
+                            ? const Color(0xFFFFFBEB)
+                            : (msg.isMeshSending ? const Color(0xFFEFF6FF) : const Color(0xFFF0FDF4)),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(
+                          color: msg.isMeshPending
+                              ? const Color(0xFFFDE68A)
+                              : (msg.isMeshSending ? const Color(0xFFBFDBFE) : const Color(0xFFBBF7D0)),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            msg.isMeshPending
+                                ? Icons.schedule_rounded
+                                : (msg.isMeshSending ? Icons.sync_rounded : Icons.check_circle_outline_rounded),
+                            size: 11,
+                            color: msg.isMeshPending
+                                ? const Color(0xFFB45309)
+                                : (msg.isMeshSending ? const Color(0xFF1D4ED8) : const Color(0xFF15803D)),
+                          ),
+                          const SizedBox(width: 3),
+                          Text(
+                            MeshDeliveryStatus.badgeText(msg.meshDeliveryStatus),
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                              color: msg.isMeshPending
+                                  ? const Color(0xFFB45309)
+                                  : (msg.isMeshSending ? const Color(0xFF1D4ED8) : const Color(0xFF15803D)),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
 
                   // Phase 3 Cloud Sync Status Badge (Cloud Synced vs Mesh Only)
                   Container(

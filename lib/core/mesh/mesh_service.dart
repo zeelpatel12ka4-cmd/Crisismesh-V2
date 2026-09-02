@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:nearby_connections/nearby_connections.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../database/database_service.dart';
 import '../models/message_model.dart';
 
 enum MeshStatus {
@@ -23,19 +24,25 @@ class MeshService extends ChangeNotifier {
   MeshStatus _status = MeshStatus.idle;
   final Set<String> _connectedEndpoints = {};
   Future<void> Function(MessageModel message, String sourceEndpointId)? _onMessageReceived;
+  Future<void> Function(String endpointId)? _onPeerConnected;
+  Future<int> Function()? _pendingMessageFlusher;
 
   MeshStatus get status => _status;
   int get connectedPeerCount => _connectedEndpoints.length;
   bool get isConnected => _connectedEndpoints.isNotEmpty;
   Set<String> get connectedEndpoints => Set.unmodifiable(_connectedEndpoints);
 
-  /// Initializes the service with a local device ID and a message callback.
+  /// Initializes the service with a local device ID, message callback, and optional peer connection callbacks.
   void init({
     required String localDeviceId,
     required Future<void> Function(MessageModel message, String sourceEndpointId) onMessageReceived,
+    Future<void> Function(String endpointId)? onPeerConnected,
+    Future<int> Function()? pendingMessageFlusher,
   }) {
     _localDeviceId = localDeviceId;
     _onMessageReceived = onMessageReceived;
+    _onPeerConnected = onPeerConnected;
+    _pendingMessageFlusher = pendingMessageFlusher;
   }
 
   /// Verifies and requests runtime permissions required for Nearby Connections.
@@ -149,6 +156,10 @@ class MeshService extends ChangeNotifier {
       _connectedEndpoints.add(endpointId);
       _status = MeshStatus.connected;
       notifyListeners();
+
+      // Phase 5A: Notify peer connected listener and flush pending store-and-forward SOS messages
+      _onPeerConnected?.call(endpointId);
+      flushPendingMessages();
     } else {
       debugPrint('[MeshService] Connection to $endpointId failed with status: $status');
       _connectedEndpoints.remove(endpointId);
@@ -214,6 +225,49 @@ class MeshService extends ChangeNotifier {
       return sentCount;
     } catch (e) {
       debugPrint('[MeshService] Error broadcasting message: $e');
+      return 0;
+    }
+  }
+
+  /// Automatically flushes pending offline SOS messages when a peer connects (Phase 5A Store-and-Forward)
+  Future<int> flushPendingMessages() async {
+    if (_connectedEndpoints.isEmpty) {
+      debugPrint('[MeshService] No connected peers to flush pending messages to.');
+      return 0;
+    }
+
+    try {
+      if (_pendingMessageFlusher != null) {
+        return await _pendingMessageFlusher!.call();
+      }
+
+      final pending = await DatabaseService.instance.getPendingMeshMessages();
+      if (pending.isEmpty) {
+        debugPrint('[MeshService] No pending mesh messages to flush.');
+        return 0;
+      }
+
+      debugPrint('[MeshService] Flushing ${pending.length} pending mesh message(s)...');
+      int transmittedCount = 0;
+
+      for (final msg in pending) {
+        // Mark as SENDING to prevent race conditions during retry
+        await DatabaseService.instance.updateMeshDeliveryStatus(msg.id, MeshDeliveryStatus.sending);
+        final sentCount = await broadcastMessage(msg);
+        if (sentCount > 0) {
+          await DatabaseService.instance.markMessageMeshTransmitted(msg.id);
+          transmittedCount++;
+          debugPrint('[MeshService] Pending SOS ${msg.id} successfully transmitted to $sentCount peer(s).');
+        } else {
+          // Revert back to PENDING on failure
+          await DatabaseService.instance.updateMeshDeliveryStatus(msg.id, MeshDeliveryStatus.pending);
+          debugPrint('[MeshService] Pending SOS ${msg.id} failed transmission; returned to pending.');
+        }
+      }
+
+      return transmittedCount;
+    } catch (e) {
+      debugPrint('[MeshService] Error flushing pending messages: $e');
       return 0;
     }
   }

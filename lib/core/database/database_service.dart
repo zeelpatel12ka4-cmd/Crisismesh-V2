@@ -22,13 +22,24 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 1,
+      version: 2,
       onCreate: _createDB,
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          try {
+            await db.execute(
+              "ALTER TABLE messages ADD COLUMN mesh_delivery_status TEXT NOT NULL DEFAULT 'transmitted_to_peer'",
+            );
+          } catch (e) {
+            // Column may already exist
+          }
+        }
+      },
     );
   }
 
   Future<void> _createDB(Database db, int version) async {
-    // Create messages table
+    // Create messages table with Phase 5A mesh delivery tracking
     await db.execute('''
       CREATE TABLE messages (
         id TEXT PRIMARY KEY,
@@ -45,7 +56,8 @@ class DatabaseService {
         priority_tier TEXT NOT NULL,
         priority_score INTEGER NOT NULL,
         signature TEXT,
-        synced INTEGER NOT NULL DEFAULT 0
+        synced INTEGER NOT NULL DEFAULT 0,
+        mesh_delivery_status TEXT NOT NULL DEFAULT 'transmitted_to_peer'
       )
     ''');
 
@@ -125,6 +137,35 @@ class DatabaseService {
       where: 'id = ?',
       whereArgs: [id],
     );
+  }
+
+  /// Retrieves all pending mesh messages (mesh_delivery_status = 'pending') sorted by timestamp ascending (FIFO).
+  Future<List<MessageModel>> getPendingMeshMessages() async {
+    final db = await database;
+    final maps = await db.query(
+      'messages',
+      where: 'mesh_delivery_status = ?',
+      whereArgs: [MeshDeliveryStatus.pending],
+      orderBy: 'timestamp ASC',
+    );
+
+    return maps.map((map) => MessageModel.fromMap(map)).toList();
+  }
+
+  /// Updates a message's mesh delivery status ('pending', 'sending', 'transmitted_to_peer').
+  Future<int> updateMeshDeliveryStatus(String id, String status) async {
+    final db = await database;
+    return await db.update(
+      'messages',
+      {'mesh_delivery_status': status},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  /// Marks a message as successfully transmitted to at least one peer.
+  Future<int> markMessageMeshTransmitted(String id) async {
+    return await updateMeshDeliveryStatus(id, MeshDeliveryStatus.transmittedToPeer);
   }
 
   /// Clean up database connections (useful for testing or hot restarts).
