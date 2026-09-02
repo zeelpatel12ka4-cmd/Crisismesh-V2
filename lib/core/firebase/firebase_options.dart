@@ -20,27 +20,27 @@ class DefaultFirebaseOptions {
   }
 
   static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'AIzaSyCrisisMeshAndroidBridgePlaceholder123',
-    appId: '1:100000000000:android:crisismeshapp000000',
-    messagingSenderId: '100000000000',
-    projectId: 'crisismesh-app',
-    storageBucket: 'crisismesh-app.appspot.com',
+    apiKey: 'AIzaSyD7uttTa9gITDJc4LmV-8CB7z_ObeiyB0c',
+    appId: '1:151182768339:android:c0dbe69764aaeddc0e3c26',
+    messagingSenderId: '151182768339',
+    projectId: 'crisis-mesh-7e39c',
+    storageBucket: 'crisis-mesh-7e39c.firebasestorage.app',
   );
-
   static const FirebaseOptions ios = FirebaseOptions(
-    apiKey: 'AIzaSyCrisisMeshIOSBridgePlaceholder123',
-    appId: '1:100000000000:ios:crisismeshapp000000',
-    messagingSenderId: '100000000000',
-    projectId: 'crisismesh-app',
-    storageBucket: 'crisismesh-app.appspot.com',
-    iosBundleId: 'com.crisismesh.app',
+    apiKey: 'AIzaSyBSFN038EA6JTLb1jcwKIDkRSn_x4BgcJw',
+    appId: '1:151182768339:ios:aea9d2639a8ee9d80e3c26',
+    messagingSenderId: '151182768339',
+    projectId: 'crisis-mesh-7e39c',
+    storageBucket: 'crisis-mesh-7e39c.firebasestorage.app',
+    iosBundleId: 'com.example.flutterApp1',
   );
-
   static const FirebaseOptions web = FirebaseOptions(
-    apiKey: 'AIzaSyCrisisMeshWebBridgePlaceholder123',
-    appId: '1:100000000000:web:crisismeshapp000000',
-    messagingSenderId: '100000000000',
-    projectId: 'crisismesh-app',
-    storageBucket: 'crisismesh-app.appspot.com',
+    apiKey: 'AIzaSyAlKHyTjAe9akzPAA41y0GVgp1f4NQBv7I',
+    appId: '1:151182768339:web:ea0f8ba437ecaa0f0e3c26',
+    messagingSenderId: '151182768339',
+    projectId: 'crisis-mesh-7e39c',
+    authDomain: 'crisis-mesh-7e39c.firebaseapp.com',
+    storageBucket: 'crisis-mesh-7e39c.firebasestorage.app',
+    measurementId: 'G-ZBNYFTDKQZ',
   );
 }

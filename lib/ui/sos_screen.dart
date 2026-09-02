@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:uuid/uuid.dart';
@@ -51,17 +52,19 @@ class _SosScreenState extends State<SosScreen> {
     _descriptionController.addListener(_onDescriptionChanged);
     _fetchLocation();
 
-    // Initialize MeshService for Phase 2 peer communication
-    MeshService.instance.init(
-      localDeviceId: _deviceId,
-      onMessageReceived: _handleIncomingMeshMessage,
-    );
-    MeshService.instance.addListener(_onMeshStatusChanged);
-    MeshService.instance.startMesh();
+    if (!kIsWeb) {
+      // Initialize MeshService for Phase 2 peer communication
+      MeshService.instance.init(
+        localDeviceId: _deviceId,
+        onMessageReceived: _handleIncomingMeshMessage,
+      );
+      MeshService.instance.addListener(_onMeshStatusChanged);
+      MeshService.instance.startMesh();
 
-    // Initialize SyncService for Phase 3 Cloud Bridge Synchronization
-    SyncService.instance.init(localDeviceId: _deviceId);
-    SyncService.instance.addListener(_onSyncStatusChanged);
+      // Initialize SyncService for Phase 3 Cloud Bridge Synchronization
+      SyncService.instance.init(localDeviceId: _deviceId);
+      SyncService.instance.addListener(_onSyncStatusChanged);
+    }
   }
 
   @override
@@ -141,6 +144,7 @@ class _SosScreenState extends State<SosScreen> {
 
   /// Reload the message list from the database.
   Future<void> _loadMessageHistory() async {
+    if (kIsWeb) return;
     final list = await DatabaseService.instance.getMessages();
     if (mounted) {
       setState(() {

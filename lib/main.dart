@@ -1,23 +1,44 @@
+import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'core/database/database_service.dart';
+import 'core/firebase/firebase_options.dart';
+import 'ui/responder/responder_dashboard_screen.dart';
 import 'ui/sos_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Eagerly initialize SQLite database
-  await DatabaseService.instance.database;
+  // Initialize Firebase for web and native targets
+  try {
+    if (Firebase.apps.isEmpty) {
+      await Firebase.initializeApp(
+        options: DefaultFirebaseOptions.currentPlatform,
+      );
+    }
+  } catch (e) {
+    debugPrint('Firebase initialization notice: $e');
+  }
 
-  // Set system UI overlay style for a clean emergency light theme
-  SystemChrome.setSystemUIOverlayStyle(
-    const SystemUiOverlayStyle(
-      statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.dark,
-      systemNavigationBarColor: Colors.white,
-      systemNavigationBarIconBrightness: Brightness.dark,
-    ),
-  );
+  // Eagerly initialize SQLite database on native platforms
+  if (!kIsWeb) {
+    try {
+      await DatabaseService.instance.database;
+    } catch (e) {
+      debugPrint('SQLite initialization notice: $e');
+    }
+
+    // Set system UI overlay style for a clean emergency light theme
+    SystemChrome.setSystemUIOverlayStyle(
+      const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.dark,
+        systemNavigationBarColor: Colors.white,
+        systemNavigationBarIconBrightness: Brightness.dark,
+      ),
+    );
+  }
 
   runApp(const MyApp());
 }
@@ -113,7 +134,11 @@ class MyApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const SosScreen(),
+      home: kIsWeb ? const ResponderDashboardScreen() : const SosScreen(),
+      routes: {
+        '/sos': (context) => const SosScreen(),
+        '/responder': (context) => const ResponderDashboardScreen(),
+      },
     );
   }
 }

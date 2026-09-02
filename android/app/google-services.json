@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "151182768339",
+    "project_id": "crisis-mesh-7e39c",
+    "storage_bucket": "crisis-mesh-7e39c.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:151182768339:android:c0dbe69764aaeddc0e3c26",
+        "android_client_info": {
+          "package_name": "com.crisismesh.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD7uttTa9gITDJc4LmV-8CB7z_ObeiyB0c"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
