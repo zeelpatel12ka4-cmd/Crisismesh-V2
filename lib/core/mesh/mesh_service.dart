@@ -1,7 +1,9 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:nearby_connections/nearby_connections.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../battery/battery_duty_cycle_manager.dart';
 import '../database/database_service.dart';
 import '../models/message_model.dart';
 
@@ -18,6 +20,7 @@ class MeshService extends ChangeNotifier {
 
   static const String _serviceId = 'com.crisismesh.mesh';
   static const int maxHops = 7;
+  static const MethodChannel _backgroundChannel = MethodChannel('com.crisismesh.app/background_service');
   final Strategy _strategy = Strategy.P2P_CLUSTER;
 
   String _localDeviceId = 'unknown';
@@ -45,7 +48,7 @@ class MeshService extends ChangeNotifier {
     _pendingMessageFlusher = pendingMessageFlusher;
   }
 
-  /// Verifies and requests runtime permissions required for Nearby Connections.
+  /// Verifies and requests runtime permissions required for Nearby Connections & Background Service.
   Future<bool> checkAndRequestPermissions() async {
     try {
       final permissions = [
@@ -54,6 +57,7 @@ class MeshService extends ChangeNotifier {
         Permission.bluetoothAdvertise,
         Permission.bluetoothConnect,
         Permission.nearbyWifiDevices,
+        Permission.notification,
       ];
 
       final statuses = await permissions.request();
@@ -63,19 +67,41 @@ class MeshService extends ChangeNotifier {
       final btAdvGranted = statuses[Permission.bluetoothAdvertise]?.isGranted ?? true;
       final btConnGranted = statuses[Permission.bluetoothConnect]?.isGranted ?? true;
 
-      return locationGranted && btScanGranted && btAdvGranted && btConnGranted;
+      final isGranted = locationGranted && btScanGranted && btAdvGranted && btConnGranted;
+      if (!isGranted) {
+        debugPrint('[MeshService] Permissions incomplete: location=$locationGranted, btScan=$btScanGranted, btAdv=$btAdvGranted, btConn=$btConnGranted');
+      }
+      return isGranted;
     } catch (e) {
       debugPrint('[MeshService] Error requesting permissions: $e');
       return false;
     }
   }
 
-  /// Starts both advertising and discovery (symmetric P2P_CLUSTER).
+  /// Starts both advertising and discovery (symmetric P2P_CLUSTER) with adaptive battery duty cycling.
   Future<bool> startMesh() async {
+    if (_status == MeshStatus.searching || _status == MeshStatus.connected) {
+      debugPrint('[MeshService] Mesh already active.');
+      return true;
+    }
+
     final granted = await checkAndRequestPermissions();
     if (!granted) {
       debugPrint('[MeshService] Permissions not granted. Cannot start mesh.');
+      _status = MeshStatus.idle;
+      notifyListeners();
       return false;
+    }
+
+    // Phase 5B: Activate native Android Foreground Service while app is visible
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      try {
+        await _backgroundChannel.invokeMethod('startForegroundService');
+        final isRunning = await isNativeBackgroundServiceRunning();
+        debugPrint('[MeshService] Native Android foreground service started: $isRunning');
+      } catch (e) {
+        debugPrint('[MeshService] Notice: Could not start native background service: $e');
+      }
     }
 
     _status = MeshStatus.searching;
@@ -83,6 +109,13 @@ class MeshService extends ChangeNotifier {
 
     final adv = await _startAdvertising();
     final disc = await _startDiscovery();
+
+    // Phase 5B.2: Activate Adaptive Battery Duty-Cycling scheduler for discovery
+    BatteryDutyCycleManager.instance.startScheduler(
+      onScanStart: _startDiscovery,
+      onScanStop: _stopDiscovery,
+      isConnected: () => isConnected,
+    );
 
     return adv || disc;
   }
@@ -115,6 +148,15 @@ class MeshService extends ChangeNotifier {
     } catch (e) {
       debugPrint('[MeshService] startDiscovery failed: $e');
       return false;
+    }
+  }
+
+  Future<void> _stopDiscovery() async {
+    try {
+      await Nearby().stopDiscovery();
+      debugPrint('[MeshService] Discovery paused for battery duty-cycle sleep.');
+    } catch (e) {
+      debugPrint('[MeshService] stopDiscovery failed: $e');
     }
   }
 
@@ -265,6 +307,10 @@ class MeshService extends ChangeNotifier {
         }
       }
 
+      // Phase 5B.2: Notify battery duty-cycle manager of pending queue state update
+      final remaining = await DatabaseService.instance.getPendingMeshMessages();
+      BatteryDutyCycleManager.instance.notifyPendingCountChanged(remaining.length);
+
       return transmittedCount;
     } catch (e) {
       debugPrint('[MeshService] Error flushing pending messages: $e');
@@ -272,8 +318,16 @@ class MeshService extends ChangeNotifier {
     }
   }
 
-  /// Clean shutdown of mesh operations.
+  /// Clean shutdown of mesh operations and Android Foreground Service.
   Future<void> stopMesh() async {
+    if (_status == MeshStatus.idle && _connectedEndpoints.isEmpty) {
+      debugPrint('[MeshService] Mesh already stopped.');
+      return;
+    }
+
+    // Phase 5B.2: Stop battery duty-cycle scheduler
+    BatteryDutyCycleManager.instance.stopScheduler();
+
     try {
       await Nearby().stopAdvertising();
       await Nearby().stopDiscovery();
@@ -282,7 +336,28 @@ class MeshService extends ChangeNotifier {
       _status = MeshStatus.idle;
       notifyListeners();
     } catch (e) {
-      debugPrint('[MeshService] Error stopping mesh: $e');
+      debugPrint('[MeshService] Error stopping Nearby: $e');
+    }
+
+    // Phase 5B: Stop native Android Foreground Service
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      try {
+        await _backgroundChannel.invokeMethod('stopForegroundService');
+        debugPrint('[MeshService] Native Android foreground service stopped.');
+      } catch (e) {
+        debugPrint('[MeshService] Notice: Could not stop native background service: $e');
+      }
+    }
+  }
+
+  /// Checks if the native Android Foreground Service is currently running.
+  Future<bool> isNativeBackgroundServiceRunning() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return false;
+    try {
+      final result = await _backgroundChannel.invokeMethod<bool>('isForegroundServiceRunning');
+      return result ?? false;
+    } catch (e) {
+      return false;
     }
   }
 }

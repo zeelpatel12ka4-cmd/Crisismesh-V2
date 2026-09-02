@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:uuid/uuid.dart';
+import '../core/battery/battery_duty_cycle_manager.dart';
 import '../core/database/database_service.dart';
 import '../core/mesh/mesh_service.dart';
 import '../core/models/message_model.dart';
@@ -53,7 +54,7 @@ class _SosScreenState extends State<SosScreen> {
     _fetchLocation();
 
     if (!kIsWeb) {
-      // Initialize MeshService for Phase 2 & Phase 5A peer communication and store-and-forward
+      // Initialize MeshService for Phase 2, 5A & 5B background mesh
       MeshService.instance.init(
         localDeviceId: _deviceId,
         onMessageReceived: _handleIncomingMeshMessage,
@@ -64,12 +65,41 @@ class _SosScreenState extends State<SosScreen> {
         },
       );
       MeshService.instance.addListener(_onMeshStatusChanged);
-      MeshService.instance.startMesh();
+      _initAndSyncMesh();
 
       // Initialize SyncService for Phase 3 Cloud Bridge Synchronization
       SyncService.instance.init(localDeviceId: _deviceId);
       SyncService.instance.addListener(_onSyncStatusChanged);
     }
+  }
+
+  /// Synchronizes UI with native foreground service state and starts mesh if already active
+  Future<void> _initAndSyncMesh() async {
+    final isServiceRunning = await MeshService.instance.isNativeBackgroundServiceRunning();
+    if (isServiceRunning || MeshService.instance.status == MeshStatus.idle) {
+      await MeshService.instance.startMesh();
+    }
+  }
+
+  /// Explicit user activation action for Emergency Mesh with clear permission error feedback
+  Future<void> _enableEmergencyMesh() async {
+    final success = await MeshService.instance.startMesh();
+    if (!success && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text(
+            'Emergency Mesh requires Nearby and Location permissions to discover peers in the background.',
+          ),
+          action: SnackBarAction(
+            label: 'RETRY',
+            onPressed: _enableEmergencyMesh,
+          ),
+          duration: const Duration(seconds: 5),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+    _fetchLocation();
   }
 
   @override
@@ -321,6 +351,10 @@ class _SosScreenState extends State<SosScreen> {
 
     // Refresh local UI history
     await _loadMessageHistory();
+
+    // Phase 5B.2: Notify battery duty-cycle manager of pending queue state update
+    final currentPending = await DatabaseService.instance.getPendingMeshMessages();
+    BatteryDutyCycleManager.instance.notifyPendingCountChanged(currentPending.length);
 
     // Phase 3: If device currently has internet, automatically sync to Firestore cloud
     SyncService.instance.checkConnectivityAndSync();
@@ -682,21 +716,21 @@ class _SosScreenState extends State<SosScreen> {
         borderColor = const Color(0xFFBBF7D0);
         textColor = const Color(0xFF15803D);
         titleText = '🟢 ${mesh.connectedPeerCount} nearby device${mesh.connectedPeerCount == 1 ? "" : "s"} connected';
-        subtitleText = 'Ready to broadcast and relay offline emergency packets';
+        subtitleText = 'Emergency Mesh Active • Background relay ready';
         indicator = const Icon(Icons.link, size: 18, color: Color(0xFF15803D));
         break;
       case MeshStatus.searching:
-        badgeBg = const Color(0xFFFFFBEB);
-        borderColor = const Color(0xFFFDE68A);
-        textColor = const Color(0xFFB45309);
-        titleText = '🟡 Searching for nearby devices';
-        subtitleText = 'Nearby Connections mesh active • Scanning P2P cluster';
+        badgeBg = const Color(0xFFF0FDF4);
+        borderColor = const Color(0xFFBBF7D0);
+        textColor = const Color(0xFF15803D);
+        titleText = '🟢 Emergency Mesh Active';
+        subtitleText = 'Monitoring nearby peers • Ready to relay in background';
         indicator = const SizedBox(
           width: 14,
           height: 14,
           child: CircularProgressIndicator(
             strokeWidth: 2,
-            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFB45309)),
+            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF15803D)),
           ),
         );
         break;
@@ -704,16 +738,19 @@ class _SosScreenState extends State<SosScreen> {
         badgeBg = const Color(0xFFF8FAFC);
         borderColor = const Color(0xFFE2E8F0);
         textColor = const Color(0xFF475569);
-        titleText = '⚪ No nearby devices';
-        subtitleText = 'Local mode only • Tap to scan';
+        titleText = '⚪ Emergency Mesh Inactive';
+        subtitleText = 'Tap to enable background peer discovery & relay';
         indicator = TextButton(
-          onPressed: () => MeshService.instance.startMesh(),
+          onPressed: _enableEmergencyMesh,
           style: TextButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            backgroundColor: const Color(0xFF0F172A),
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
             minimumSize: Size.zero,
             tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           ),
-          child: const Text('RETRY', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+          child: const Text('ENABLE MESH', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
         );
         break;
     }

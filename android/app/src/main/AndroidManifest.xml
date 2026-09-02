@@ -17,10 +17,21 @@
     <!-- Nearby Wi-Fi Devices (Android 13+ / API 33+) -->
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
 
+    <!-- Foreground Service permissions (Phase 5B Background Mesh) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:label="CrisisMesh"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
+        <!-- Phase 5B: Crisis Mesh Background Mesh Foreground Service -->
+        <service
+            android:name=".CrisisMeshForegroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
