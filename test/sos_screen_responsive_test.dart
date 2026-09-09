@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_app1/ui/sos_screen.dart';
 import 'package:flutter/services.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:flutter_app1/core/crypto/crypto_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -52,9 +53,14 @@ void main() {
     },
   ];
 
-  setUpAll(() {
+  setUpAll(() async {
     // Set databaseFactory to sqflite plugin's default databaseFactorySqflitePlugin
     databaseFactory = databaseFactorySqflitePlugin;
+
+    // Initialize CryptoService with deterministic test key
+    await CryptoService.instance.init(
+      customSeed: Uint8List.fromList(List.generate(32, (i) => i + 1)),
+    );
 
     // Set up mock method channels for geolocator, nearby_connections, permission_handler, path_provider
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -309,6 +315,7 @@ void main() {
       await tester.ensureVisible(broadcastButton);
       await tester.tap(broadcastButton);
       await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
 
       // Verify clear feedback stating "SOS SAVED LOCALLY"
       expect(find.textContaining('SOS SAVED LOCALLY'), findsOneWidget);

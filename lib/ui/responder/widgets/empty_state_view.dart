@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../../core/services/responder_service.dart';
 
 /// Clean, professional empty, loading, offline, and error states for Responder Command Center
 class ResponderEmptyStateView extends StatelessWidget {
@@ -121,33 +122,57 @@ class ResponderLoadingView extends StatelessWidget {
   }
 }
 
-/// Non-intrusive banner indicating offline Firestore state
+/// Non-intrusive banner indicating Firestore connection issues
 class ResponderOfflineBanner extends StatelessWidget {
+  final ResponderConnectionState? state;
+  final String? errorMessage;
   final VoidCallback? onRetry;
 
-  const ResponderOfflineBanner({super.key, this.onRetry});
+  const ResponderOfflineBanner({
+    super.key,
+    this.state,
+    this.errorMessage,
+    this.onRetry,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final bool isPermission = state == ResponderConnectionState.permissionDenied;
+    final bool isUnavailable = state == ResponderConnectionState.serviceUnavailable;
+
+    final Color bgColor = isPermission ? const Color(0xFFFEF2F2) : const Color(0xFFFFFBEB);
+    final Color borderColor = isPermission ? const Color(0xFFFECACA) : const Color(0xFFFDE68A);
+    final Color textColor = isPermission ? const Color(0xFF991B1B) : const Color(0xFF92400E);
+    final Color btnColor = isPermission ? const Color(0xFFDC2626) : const Color(0xFFB45309);
+    final IconData icon = isPermission
+        ? Icons.lock_outline_rounded
+        : (isUnavailable ? Icons.sync_problem_rounded : Icons.cloud_off_rounded);
+
+    final String text = isPermission
+        ? 'Security Rules Denied: Missing permissions for /sos_reports. Remote real-time updates blocked.'
+        : (isUnavailable
+            ? 'Cloud Service Unavailable: Unable to reach Cloud Firestore servers. Retrying...'
+            : 'Offline Mode: No Internet connection. Reading cached reports from local store.');
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      decoration: const BoxDecoration(
-        color: Color(0xFFFFFBEB), // Amber 50
+      decoration: BoxDecoration(
+        color: bgColor,
         border: Border(
-          bottom: BorderSide(color: Color(0xFFFDE68A)), // Amber 200
+          bottom: BorderSide(color: borderColor),
         ),
       ),
       child: Row(
         children: [
-          const Icon(Icons.cloud_off, size: 18, color: Color(0xFFD97706)),
+          Icon(icon, size: 18, color: btnColor),
           const SizedBox(width: 10),
-          const Expanded(
+          Expanded(
             child: Text(
-              'Offline Mode: Reading cached reports from local Firestore store. Remote updates will resume once connected.',
+              text,
               style: TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w500,
-                color: Color(0xFF92400E),
+                color: textColor,
               ),
             ),
           ),
@@ -156,7 +181,7 @@ class ResponderOfflineBanner extends StatelessWidget {
               onPressed: onRetry,
               style: TextButton.styleFrom(
                 visualDensity: VisualDensity.compact,
-                foregroundColor: const Color(0xFFB45309),
+                foregroundColor: btnColor,
               ),
               child: const Text('Retry', style: TextStyle(fontWeight: FontWeight.w700)),
             ),

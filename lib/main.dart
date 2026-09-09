@@ -2,10 +2,12 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'core/crypto/crypto_service.dart';
 import 'core/database/database_service.dart';
 import 'core/firebase/firebase_options.dart';
 import 'ui/responder/responder_dashboard_screen.dart';
 import 'ui/sos_screen.dart';
+import 'ui/contacts/contacts_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,12 +23,18 @@ void main() async {
     debugPrint('Firebase initialization notice: $e');
   }
 
-  // Eagerly initialize SQLite database on native platforms
+  // Eagerly initialize SQLite database and Cryptographic Keypairs on native platforms
   if (!kIsWeb) {
     try {
       await DatabaseService.instance.database;
     } catch (e) {
       debugPrint('SQLite initialization notice: $e');
+    }
+
+    try {
+      await CryptoService.instance.init();
+    } catch (e) {
+      debugPrint('CryptoService initialization notice: $e');
     }
 
     // Set system UI overlay style for a clean emergency light theme
@@ -138,6 +146,7 @@ class MyApp extends StatelessWidget {
       routes: {
         '/sos': (context) => const SosScreen(),
         '/responder': (context) => const ResponderDashboardScreen(),
+        '/contacts': (context) => const ContactsScreen(),
       },
     );
   }

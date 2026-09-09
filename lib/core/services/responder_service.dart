@@ -144,6 +144,15 @@ class FirestoreResponderProvider implements ResponderDataProvider {
   }
 }
 
+enum ResponderConnectionState {
+  connecting,
+  connected,
+  networkOffline,
+  permissionDenied,
+  serviceUnavailable,
+  error,
+}
+
 /// Central state management service for Phase 4 Responder Command Center
 class ResponderService extends ChangeNotifier {
   static final ResponderService instance = ResponderService._init();
@@ -162,7 +171,7 @@ class ResponderService extends ChangeNotifier {
   String _searchQuery = '';
 
   bool _isLoading = true;
-  bool _isOffline = false;
+  ResponderConnectionState _connectionState = ResponderConnectionState.connecting;
   String? _errorMessage;
 
   // Getters
@@ -173,7 +182,12 @@ class ResponderService extends ChangeNotifier {
   String get selectedCategoryFilter => _selectedCategoryFilter;
   String get searchQuery => _searchQuery;
   bool get isLoading => _isLoading;
-  bool get isOffline => _isOffline;
+  ResponderConnectionState get connectionState => _connectionState;
+  bool get isConnected => _connectionState == ResponderConnectionState.connected;
+  bool get isPermissionDenied => _connectionState == ResponderConnectionState.permissionDenied;
+  bool get isNetworkOffline => _connectionState == ResponderConnectionState.networkOffline;
+  bool get isServiceUnavailable => _connectionState == ResponderConnectionState.serviceUnavailable;
+  bool get isOffline => _connectionState != ResponderConnectionState.connected;
   String? get errorMessage => _errorMessage;
 
   // KPI Metrics Getters
@@ -246,6 +260,7 @@ class ResponderService extends ChangeNotifier {
 
     _isLoading = true;
     _errorMessage = null;
+    _connectionState = ResponderConnectionState.connecting;
     notifyListeners();
 
     _subscription?.cancel();
@@ -254,6 +269,7 @@ class ResponderService extends ChangeNotifier {
         _allIncidents = incidents;
         _isLoading = false;
         _errorMessage = null;
+        _connectionState = ResponderConnectionState.connected;
 
         // Maintain selection reference if updated
         if (_selectedIncident != null) {
@@ -269,7 +285,16 @@ class ResponderService extends ChangeNotifier {
         debugPrint('[ResponderService] Stream error: $error');
         _isLoading = false;
         _errorMessage = error.toString();
-        _isOffline = true;
+        if (error is FirebaseException && error.code == 'permission-denied' ||
+            error.toString().contains('permission-denied')) {
+          _connectionState = ResponderConnectionState.permissionDenied;
+        } else if (error.toString().toLowerCase().contains('network') ||
+                   error.toString().toLowerCase().contains('socket') ||
+                   error.toString().toLowerCase().contains('offline')) {
+          _connectionState = ResponderConnectionState.networkOffline;
+        } else {
+          _connectionState = ResponderConnectionState.serviceUnavailable;
+        }
         notifyListeners();
       },
     );
@@ -286,6 +311,7 @@ class ResponderService extends ChangeNotifier {
     _allIncidents = incidents;
     _isLoading = false;
     _errorMessage = null;
+    _connectionState = ResponderConnectionState.connected;
     notifyListeners();
   }
 

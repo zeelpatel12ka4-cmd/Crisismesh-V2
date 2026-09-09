@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Flutter App1</string>
+	<string>Crisis Mesh</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -15,7 +15,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>flutter_app1</string>
+	<string>Crisis Mesh</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -66,5 +66,17 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+
+	<!-- Apple Privacy Permission Usage Descriptions for Crisis Mesh -->
+	<key>NSCameraUsageDescription</key>
+	<string>Crisis Mesh uses the camera to scan contact emergency QR codes for secure end-to-end encrypted messaging.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Crisis Mesh uses your location to attach emergency GPS coordinates to your SOS broadcasts.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Crisis Mesh uses your location to report your position during offline emergency search and rescue operations.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Crisis Mesh uses Bluetooth to discover and communicate with nearby emergency mesh devices when cellular network is unavailable.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Crisis Mesh communicates with nearby peer devices over Bluetooth during emergencies.</string>
 </dict>
 </plist>

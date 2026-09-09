@@ -224,6 +224,63 @@ class IncidentCard extends StatelessWidget {
                     ],
                   ),
                 ),
+                const SizedBox(width: 4),
+
+                // Phase 7 Authenticity Badge
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: incident.authenticityStatus == 'verified'
+                        ? const Color(0xFFF0FDF4)
+                        : (incident.authenticityStatus == 'invalid_signature'
+                            ? const Color(0xFFFEF2F2)
+                            : const Color(0xFFF8FAFC)),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(
+                      color: incident.authenticityStatus == 'verified'
+                          ? const Color(0xFFBBF7D0)
+                          : (incident.authenticityStatus == 'invalid_signature'
+                              ? const Color(0xFFFECACA)
+                              : const Color(0xFFE2E8F0)),
+                      width: 0.8,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        incident.authenticityStatus == 'verified'
+                            ? Icons.verified_rounded
+                            : (incident.authenticityStatus == 'invalid_signature'
+                                ? Icons.gpp_bad_rounded
+                                : Icons.shield_outlined),
+                        size: 10,
+                        color: incident.authenticityStatus == 'verified'
+                            ? const Color(0xFF15803D)
+                            : (incident.authenticityStatus == 'invalid_signature'
+                                ? const Color(0xFFDC2626)
+                                : const Color(0xFF64748B)),
+                      ),
+                      const SizedBox(width: 2),
+                      Text(
+                        incident.authenticityStatus == 'verified'
+                            ? 'Verified'
+                            : (incident.authenticityStatus == 'invalid_signature'
+                                ? 'Tampered'
+                                : 'Unverified'),
+                        style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w700,
+                          color: incident.authenticityStatus == 'verified'
+                              ? const Color(0xFF15803D)
+                              : (incident.authenticityStatus == 'invalid_signature'
+                                  ? const Color(0xFFDC2626)
+                                  : const Color(0xFF64748B)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
                 const Spacer(),
 
                 // GPS Indicator

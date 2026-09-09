@@ -8,17 +8,37 @@ import '../firebase/firebase_options.dart';
 import '../models/message_model.dart';
 
 enum SyncStatus {
-  offline,
-  checking,
+  networkOffline,
+  firestoreUnavailable,
+  firestorePermissionDenied,
   syncing,
-  synced,
-  error,
+  connected,
+  syncError;
+
+  // Backward compatibility helpers
+  static const SyncStatus offline = SyncStatus.networkOffline;
+  static const SyncStatus checking = SyncStatus.syncing;
+  static const SyncStatus synced = SyncStatus.connected;
+  static const SyncStatus error = SyncStatus.syncError;
+
+  bool get isConnected => this == SyncStatus.connected;
+  bool get isNetworkOffline => this == SyncStatus.networkOffline;
+  bool get isPermissionDenied => this == SyncStatus.firestorePermissionDenied;
+  bool get isFirestoreUnavailable => this == SyncStatus.firestoreUnavailable;
+  bool get isSyncError => this == SyncStatus.syncError;
+  bool get isSyncing => this == SyncStatus.syncing;
+}
+
+enum FirestoreReachability {
+  connected,
+  permissionDenied,
+  unavailable,
 }
 
 /// Abstract provider to allow decoupling and mock-based unit/integration testing.
 abstract class FirestoreSyncProvider {
   Future<void> initialize();
-  Future<bool> checkFirestoreReachability();
+  Future<FirestoreReachability> checkFirestoreReachability();
   Future<void> uploadSosReport(String docId, Map<String, dynamic> data);
 }
 
@@ -43,7 +63,7 @@ class DefaultFirestoreProvider implements FirestoreSyncProvider {
   }
 
   @override
-  Future<bool> checkFirestoreReachability() async {
+  Future<FirestoreReachability> checkFirestoreReachability() async {
     try {
       await initialize();
       // Verify Firestore client can interact with server/network
@@ -52,11 +72,19 @@ class DefaultFirestoreProvider implements FirestoreSyncProvider {
       await instance.collection('sos_reports').limit(1).get(
             const GetOptions(source: Source.server),
           ).timeout(const Duration(seconds: 4));
-      return true;
+      return FirestoreReachability.connected;
+    } on FirebaseException catch (e) {
+      debugPrint('[DefaultFirestoreProvider] Firestore reachability FirebaseException: ${e.code} - ${e.message}');
+      if (e.code == 'permission-denied') {
+        return FirestoreReachability.permissionDenied;
+      }
+      return FirestoreReachability.unavailable;
     } catch (e) {
-      debugPrint('[DefaultFirestoreProvider] Firestore reachability probe: $e');
-      // If server probe timed out or failed, check if basic network is responsive
-      return false;
+      debugPrint('[DefaultFirestoreProvider] Firestore reachability probe error: $e');
+      if (e.toString().contains('permission-denied')) {
+        return FirestoreReachability.permissionDenied;
+      }
+      return FirestoreReachability.unavailable;
     }
   }
 
@@ -78,7 +106,7 @@ class SyncService extends ChangeNotifier {
   SyncService._init();
 
   String _localDeviceId = 'unknown';
-  SyncStatus _status = SyncStatus.offline;
+  SyncStatus _status = SyncStatus.networkOffline;
   String? _lastError;
   int _lastSyncedCount = 0;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
@@ -87,7 +115,7 @@ class SyncService extends ChangeNotifier {
   SyncStatus get status => _status;
   String? get lastError => _lastError;
   int get lastSyncedCount => _lastSyncedCount;
-  bool get isOnline => _status != SyncStatus.offline;
+  bool get isOnline => _status == SyncStatus.connected || _status == SyncStatus.syncing;
 
   /// Initializes the sync service with local device ID and optional custom provider.
   void init({
@@ -116,8 +144,8 @@ class SyncService extends ChangeNotifier {
   Future<void> _onConnectivityChanged(List<ConnectivityResult> results) async {
     final hasNetworkInterface = results.any((r) => r != ConnectivityResult.none);
     if (!hasNetworkInterface) {
-      _status = SyncStatus.offline;
-      _lastError = null;
+      _status = SyncStatus.networkOffline;
+      _lastError = 'No network interface available';
       notifyListeners();
     } else {
       // Transitioned to a network interface: check reachability and sync
@@ -131,18 +159,26 @@ class SyncService extends ChangeNotifier {
     final hasInterface = connectivityResults.any((r) => r != ConnectivityResult.none);
 
     if (!hasInterface) {
-      _status = SyncStatus.offline;
+      _status = SyncStatus.networkOffline;
+      _lastError = 'No network interface available';
       notifyListeners();
       return 0;
     }
 
-    _status = SyncStatus.checking;
+    _status = SyncStatus.syncing;
     notifyListeners();
 
-    final isReachable = await _provider.checkFirestoreReachability();
-    if (!isReachable) {
-      debugPrint('[SyncService] Network interface active but Firestore not reachable.');
-      _status = SyncStatus.offline;
+    final reachability = await _provider.checkFirestoreReachability();
+    if (reachability == FirestoreReachability.permissionDenied) {
+      debugPrint('[SyncService] Firestore permission denied for /sos_reports.');
+      _status = SyncStatus.firestorePermissionDenied;
+      _lastError = 'Cloud security rules rejected access to /sos_reports';
+      notifyListeners();
+      return 0;
+    } else if (reachability == FirestoreReachability.unavailable) {
+      debugPrint('[SyncService] Network interface active but Firestore unreachable.');
+      _status = SyncStatus.firestoreUnavailable;
+      _lastError = 'Unable to reach Cloud Firestore servers';
       notifyListeners();
       return 0;
     }
@@ -160,7 +196,7 @@ class SyncService extends ChangeNotifier {
       final unsyncedMessages = await DatabaseService.instance.getUnsyncedMessages();
       if (unsyncedMessages.isEmpty) {
         debugPrint('[SyncService] No pending messages to sync.');
-        _status = SyncStatus.synced;
+        _status = SyncStatus.connected;
         notifyListeners();
         return 0;
       }
@@ -183,6 +219,11 @@ class SyncService extends ChangeNotifier {
           debugPrint('[SyncService] Partial batch failure on message ${message.id}: $e');
           _lastError = e.toString();
           hasPartialFailure = true;
+          if (e is FirebaseException && e.code == 'permission-denied' || e.toString().contains('permission-denied')) {
+            _status = SyncStatus.firestorePermissionDenied;
+            notifyListeners();
+            return syncedCount;
+          }
           // Halt batch on failure to allow clean retry without data loss
           break;
         }
@@ -190,16 +231,16 @@ class SyncService extends ChangeNotifier {
 
       _lastSyncedCount = syncedCount;
       if (hasPartialFailure) {
-        _status = SyncStatus.error;
+        _status = SyncStatus.syncError;
       } else {
-        _status = SyncStatus.synced;
+        _status = SyncStatus.connected;
       }
       notifyListeners();
       return syncedCount;
     } catch (e) {
       debugPrint('[SyncService] Fatal sync loop error: $e');
       _lastError = e.toString();
-      _status = SyncStatus.error;
+      _status = SyncStatus.syncError;
       notifyListeners();
       return 0;
     }

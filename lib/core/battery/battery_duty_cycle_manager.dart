@@ -221,14 +221,6 @@ class BatteryDutyCycleManager extends ChangeNotifier {
       await refreshBatteryLevel();
       await refreshPendingCount();
 
-      // If already connected to an active peer, maintain connection and check periodically
-      if (isConnected()) {
-        _isScanning = false;
-        notifyListeners();
-        await _interruptibleSleep(const Duration(seconds: 5));
-        continue;
-      }
-
       final config = currentConfig;
       debugPrint('[BatteryManager] Starting Scan phase: ${config.summary}');
 
@@ -243,13 +235,6 @@ class BatteryDutyCycleManager extends ChangeNotifier {
 
       await _interruptibleSleep(config.scanDuration);
       if (!_isRunning) break;
-
-      // If peer connected during scan, do not enter sleep phase
-      if (isConnected()) {
-        _isScanning = false;
-        notifyListeners();
-        continue;
-      }
 
       // Sleep phase (discovery pause to conserve radio energy)
       debugPrint('[BatteryManager] Entering Sleep phase for ${config.sleepDuration.inSeconds}s');

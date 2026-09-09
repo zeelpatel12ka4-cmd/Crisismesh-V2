@@ -1,0 +1,111 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================================
+    // CRISIS MESH — SECURE MINIMUM FIRESTORE RULES (PHASE 7 / HACKATHON MVP)
+    // =========================================================================
+
+    // Validates that an incoming citizen SOS creation contains all mandatory schema fields
+    // and that values remain strictly within safe operational boundaries.
+    function hasValidSosCreationPayload(reportId) {
+      let d = request.resource.data;
+      return d.id == reportId
+          && d.id is string
+          && d.type == 'broadcast'
+          && d.sender_id is string
+          && d.sender_id.size() > 0
+          && d.timestamp is int
+          && d.priority_tier in ['Critical', 'Urgent', 'Needs', 'Low']
+          && d.priority_score is int
+          && d.priority_score >= 1
+          && d.priority_score <= 10
+          // Strict prevention: private keys MUST NEVER be stored in Firestore
+          && !('private_key' in d)
+          && !('secret_key' in d)
+          // Optional fields type validation if present
+          && (!('payload' in d) || d.payload is string)
+          && (!('need_type' in d) || d.need_type is string)
+          && (!('lat' in d) || d.lat is number)
+          && (!('lng' in d) || d.lng is number)
+          && (!('signature' in d) || d.signature is string)
+          && (!('public_key' in d) || d.public_key is string)
+          && (!('signature_version' in d) || d.signature_version is string)
+          && (!('authenticity_status' in d) || d.authenticity_status in ['verified', 'unverified']);
+    }
+
+    // Enforces strict immutability on citizen distress content during responder updates.
+    // Core SOS fields, geographic coordinates, and Ed25519 signatures CANNOT be altered.
+    function citizenContentUnchanged() {
+      let incoming = request.resource.data;
+      let existing = resource.data;
+      return incoming.id == existing.id
+          && incoming.sender_id == existing.sender_id
+          && incoming.timestamp == existing.timestamp
+          && (!('type' in existing) || incoming.type == existing.type)
+          && (!('payload' in existing) || incoming.payload == existing.payload)
+          && (!('need_type' in existing) || incoming.need_type == existing.need_type)
+          && (!('lat' in existing) || incoming.lat == existing.lat)
+          && (!('lng' in existing) || incoming.lng == existing.lng)
+          && (!('signature' in existing) || incoming.signature == existing.signature)
+          && (!('public_key' in existing) || incoming.public_key == existing.public_key)
+          && (!('signature_version' in existing) || incoming.signature_version == existing.signature_version)
+          && (!('authenticity_status' in existing) || incoming.authenticity_status == existing.authenticity_status)
+          && !('private_key' in incoming)
+          && !('secret_key' in incoming);
+    }
+
+    // Operational dispatch status validation
+    function hasValidStatus() {
+      return !('status' in request.resource.data)
+          || request.resource.data.status in ['open', 'assigned', 'en_route', 'resolved'];
+    }
+
+    // =========================================================================
+    // COLLECTION: sos_reports
+    // Primary storage for citizen SOS alerts relayed from Bluetooth mesh bridges
+    // =========================================================================
+    match /sos_reports/{reportId} {
+
+      // 1. READ:
+      // In demo mode, open read enables Web Command Center & mesh bridge connectivity probes.
+      // In production, gated to authenticated responders with verified JWT claims.
+      allow read: if true;
+
+      // 2. CREATE:
+      // Enforces mandatory citizen fields, bounds priority scores, validates schema types,
+      // and guarantees private keys are NEVER accepted.
+      allow create: if hasValidSosCreationPayload(reportId);
+
+      // 3. UPDATE:
+      // Segregates operational dispatch & sync updates from immutable citizen SOS content.
+      // Responder status updates and bridge sync merges are allowed;
+      // Core citizen text, GPS coordinates, and cryptographic signatures CANNOT be altered.
+      allow update: if request.resource.data.id == reportId
+                    && citizenContentUnchanged()
+                    && hasValidStatus();
+
+      // 4. DELETE:
+      // Strictly disabled across both Demo and Production.
+      // Disaster emergency ledgers are permanently immutable.
+      allow delete: if false;
+    }
+
+    // Legacy / Future Mesh Routing & Cluster Collections
+    match /crisis_messages/{messageId} {
+      allow read: if true;
+      allow create: if request.resource.data.messageId == messageId;
+      allow update, delete: if false;
+    }
+
+    match /incidents/{incidentId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.incidentId == incidentId;
+      allow delete: if false;
+    }
+
+    match /sync_metadata/{nodeId} {
+      allow read, write: if true;
+    }
+  }
+}

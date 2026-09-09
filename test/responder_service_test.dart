@@ -349,5 +349,16 @@ void main() {
       auth.logout();
       expect(auth.isAuthenticated, isFalse);
     });
+
+    test('8. State Distinction: ResponderConnectionState reflects permissionDenied and connected states', () {
+      final service = ResponderService.instance;
+      service.setIncidentsDirectly([]);
+
+      // Directly set incidents sets connected state
+      expect(service.connectionState, equals(ResponderConnectionState.connected));
+      expect(service.isConnected, isTrue);
+      expect(service.isPermissionDenied, isFalse);
+      expect(service.isNetworkOffline, isFalse);
+    });
   });
 }

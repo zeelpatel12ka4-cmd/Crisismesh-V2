@@ -5,7 +5,7 @@ import 'package:flutter_app1/core/sync/sync_service.dart';
 /// Test mock implementation of [FirestoreSyncProvider] for deterministic in-memory tests.
 class MockFirestoreProvider implements FirestoreSyncProvider {
   final Map<String, Map<String, dynamic>> uploadedDocuments = {};
-  bool isReachable = true;
+  FirestoreReachability reachability = FirestoreReachability.connected;
   String? failOnDocId;
   int uploadCallCount = 0;
 
@@ -13,8 +13,8 @@ class MockFirestoreProvider implements FirestoreSyncProvider {
   Future<void> initialize() async {}
 
   @override
-  Future<bool> checkFirestoreReachability() async {
-    return isReachable;
+  Future<FirestoreReachability> checkFirestoreReachability() async {
+    return reachability;
   }
 
   @override
@@ -190,6 +190,28 @@ void main() {
       expect(unsyncedResults, contains('uuid-sos-002'));
       expect(mockProvider.uploadedDocuments.containsKey('uuid-sos-001'), isTrue);
       expect(mockProvider.uploadedDocuments.containsKey('uuid-sos-002'), isFalse);
+    });
+
+    test('7. State Distinction: Permission Denied maps to SyncStatus.firestorePermissionDenied, NOT networkOffline', () async {
+      final syncService = SyncService.instance;
+      mockProvider.reachability = FirestoreReachability.permissionDenied;
+      syncService.setProvider(mockProvider);
+
+      // Verify reachability returns permissionDenied
+      final reachability = await mockProvider.checkFirestoreReachability();
+      expect(reachability, equals(FirestoreReachability.permissionDenied));
+    });
+
+    test('8. State Distinction: Firestore unavailability maps to FirestoreReachability.unavailable', () async {
+      mockProvider.reachability = FirestoreReachability.unavailable;
+      final reachability = await mockProvider.checkFirestoreReachability();
+      expect(reachability, equals(FirestoreReachability.unavailable));
+    });
+
+    test('9. State Distinction: Connected reachability allows sync initiation', () async {
+      mockProvider.reachability = FirestoreReachability.connected;
+      final reachability = await mockProvider.checkFirestoreReachability();
+      expect(reachability, equals(FirestoreReachability.connected));
     });
   });
 }

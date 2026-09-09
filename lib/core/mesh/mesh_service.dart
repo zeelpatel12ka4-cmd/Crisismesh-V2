@@ -2,10 +2,16 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:nearby_connections/nearby_connections.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:uuid/uuid.dart';
 import '../battery/battery_duty_cycle_manager.dart';
 import '../database/database_service.dart';
 import '../models/message_model.dart';
+import '../models/contact_model.dart';
+import '../models/private_message_model.dart';
+import '../crypto/crypto_service.dart';
+import 'transport/mesh_transport.dart';
+import 'transport/android_mesh_transport.dart';
+import 'transport/ios_mesh_transport.dart';
 
 enum MeshStatus {
   idle,
@@ -21,74 +27,103 @@ class MeshService extends ChangeNotifier {
   static const String _serviceId = 'com.crisismesh.mesh';
   static const int maxHops = 7;
   static const MethodChannel _backgroundChannel = MethodChannel('com.crisismesh.app/background_service');
-  final Strategy _strategy = Strategy.P2P_CLUSTER;
 
-  String _localDeviceId = 'unknown';
-  MeshStatus _status = MeshStatus.idle;
+  MeshTransport _transport = defaultTargetPlatform == TargetPlatform.iOS
+      ? IosMeshTransport()
+      : AndroidMeshTransport();
+
+  /// Allows test injection of mock or custom mesh transport
+  @visibleForTesting
+  void setTransportForTest(MeshTransport transport) {
+    _transport = transport;
+  }
+
+  String? _persistentDeviceId;
+  bool _isMeshActive = false;
   final Set<String> _connectedEndpoints = {};
+  final Set<String> _connectingEndpoints = {};
+
   Future<void> Function(MessageModel message, String sourceEndpointId)? _onMessageReceived;
   Future<void> Function(String endpointId)? _onPeerConnected;
   Future<int> Function()? _pendingMessageFlusher;
+  Future<void> Function(PrivateMessageEnvelope envelope, String? plaintext)? _onPrivateMessageReceived;
+  Future<void> Function(PrivateAckEnvelope ack)? _onAckReceived;
 
-  MeshStatus get status => _status;
+  void setPrivateMessageCallback(Future<void> Function(PrivateMessageEnvelope envelope, String? plaintext) callback) {
+    _onPrivateMessageReceived = callback;
+  }
+
+  void setAckCallback(Future<void> Function(PrivateAckEnvelope ack) callback) {
+    _onAckReceived = callback;
+  }
+
+  /// Stable device ID persistent for the process/session lifetime.
+  /// Harmonized with CryptoService.derivedDeviceId when cryptographic identity is initialized.
+  String get localDeviceId {
+    if (_persistentDeviceId != null && _persistentDeviceId!.isNotEmpty) {
+      return _persistentDeviceId!;
+    }
+    if (CryptoService.instance.isInitialized) {
+      _persistentDeviceId = CryptoService.instance.derivedDeviceId;
+      return _persistentDeviceId!;
+    }
+    _persistentDeviceId = 'DEV-${const Uuid().v4().substring(0, 8)}';
+    return _persistentDeviceId!;
+  }
+
+  /// Explicitly sets or updates the local device ID.
+  void setLocalDeviceId(String deviceId) {
+    if (deviceId.isNotEmpty) {
+      _persistentDeviceId = deviceId;
+    }
+  }
+
+  /// Authoritative derived MeshStatus from single source of truth (_connectedEndpoints and _isMeshActive)
+  MeshStatus get status {
+    if (!_isMeshActive) return MeshStatus.idle;
+    if (_connectedEndpoints.isNotEmpty) return MeshStatus.connected;
+    return MeshStatus.searching;
+  }
+
+  bool get isMeshActive => _isMeshActive;
   int get connectedPeerCount => _connectedEndpoints.length;
   bool get isConnected => _connectedEndpoints.isNotEmpty;
   Set<String> get connectedEndpoints => Set.unmodifiable(_connectedEndpoints);
+  Set<String> get connectingEndpoints => Set.unmodifiable(_connectingEndpoints);
 
   /// Initializes the service with a local device ID, message callback, and optional peer connection callbacks.
   void init({
-    required String localDeviceId,
+    String? localDeviceId,
     required Future<void> Function(MessageModel message, String sourceEndpointId) onMessageReceived,
     Future<void> Function(String endpointId)? onPeerConnected,
     Future<int> Function()? pendingMessageFlusher,
   }) {
-    _localDeviceId = localDeviceId;
+    if (localDeviceId != null && localDeviceId.isNotEmpty) {
+      _persistentDeviceId = localDeviceId;
+    } else if (CryptoService.instance.isInitialized) {
+      _persistentDeviceId = CryptoService.instance.derivedDeviceId;
+    }
     _onMessageReceived = onMessageReceived;
     _onPeerConnected = onPeerConnected;
     _pendingMessageFlusher = pendingMessageFlusher;
   }
 
-  /// Verifies and requests runtime permissions required for Nearby Connections & Background Service.
+  /// Verifies and requests runtime permissions required for local mesh radio & background operation.
   Future<bool> checkAndRequestPermissions() async {
-    try {
-      final permissions = [
-        Permission.location,
-        Permission.bluetoothScan,
-        Permission.bluetoothAdvertise,
-        Permission.bluetoothConnect,
-        Permission.nearbyWifiDevices,
-        Permission.notification,
-      ];
-
-      final statuses = await permissions.request();
-
-      final locationGranted = statuses[Permission.location]?.isGranted ?? false;
-      final btScanGranted = statuses[Permission.bluetoothScan]?.isGranted ?? true;
-      final btAdvGranted = statuses[Permission.bluetoothAdvertise]?.isGranted ?? true;
-      final btConnGranted = statuses[Permission.bluetoothConnect]?.isGranted ?? true;
-
-      final isGranted = locationGranted && btScanGranted && btAdvGranted && btConnGranted;
-      if (!isGranted) {
-        debugPrint('[MeshService] Permissions incomplete: location=$locationGranted, btScan=$btScanGranted, btAdv=$btAdvGranted, btConn=$btConnGranted');
-      }
-      return isGranted;
-    } catch (e) {
-      debugPrint('[MeshService] Error requesting permissions: $e');
-      return false;
-    }
+    return await _transport.checkAndRequestPermissions();
   }
 
   /// Starts both advertising and discovery (symmetric P2P_CLUSTER) with adaptive battery duty cycling.
   Future<bool> startMesh() async {
-    if (_status == MeshStatus.searching || _status == MeshStatus.connected) {
-      debugPrint('[MeshService] Mesh already active.');
+    if (_isMeshActive) {
+      debugPrint('[Mesh] Mesh already active.');
       return true;
     }
 
     final granted = await checkAndRequestPermissions();
     if (!granted) {
-      debugPrint('[MeshService] Permissions not granted. Cannot start mesh.');
-      _status = MeshStatus.idle;
+      debugPrint('[Mesh] Permissions not granted. Cannot start mesh.');
+      _isMeshActive = false;
       notifyListeners();
       return false;
     }
@@ -98,13 +133,13 @@ class MeshService extends ChangeNotifier {
       try {
         await _backgroundChannel.invokeMethod('startForegroundService');
         final isRunning = await isNativeBackgroundServiceRunning();
-        debugPrint('[MeshService] Native Android foreground service started: $isRunning');
+        debugPrint('[Mesh] Native Android foreground service started: $isRunning');
       } catch (e) {
-        debugPrint('[MeshService] Notice: Could not start native background service: $e');
+        debugPrint('[Mesh] Notice: Could not start native background service: $e');
       }
     }
 
-    _status = MeshStatus.searching;
+    _isMeshActive = true;
     notifyListeners();
 
     final adv = await _startAdvertising();
@@ -121,110 +156,142 @@ class MeshService extends ChangeNotifier {
   }
 
   Future<bool> _startAdvertising() async {
-    try {
-      return await Nearby().startAdvertising(
-        _localDeviceId,
-        _strategy,
-        onConnectionInitiated: _onConnectionInitiated,
-        onConnectionResult: _onConnectionResult,
-        onDisconnected: _onDisconnected,
-        serviceId: _serviceId,
-      );
-    } catch (e) {
-      debugPrint('[MeshService] startAdvertising failed: $e');
-      return false;
-    }
+    return await _transport.startAdvertising(
+      localDeviceId: localDeviceId,
+      serviceId: _serviceId,
+      onConnectionInitiated: _onConnectionInitiated,
+      onConnectionResult: _onConnectionResult,
+      onDisconnected: _onDisconnected,
+    );
   }
 
   Future<bool> _startDiscovery() async {
-    try {
-      return await Nearby().startDiscovery(
-        _localDeviceId,
-        _strategy,
-        onEndpointFound: _onEndpointFound,
-        onEndpointLost: _onEndpointLost,
-        serviceId: _serviceId,
-      );
-    } catch (e) {
-      debugPrint('[MeshService] startDiscovery failed: $e');
-      return false;
-    }
+    return await _transport.startDiscovery(
+      localDeviceId: localDeviceId,
+      serviceId: _serviceId,
+      onEndpointFound: _onEndpointFound,
+      onEndpointLost: _onEndpointLost,
+    );
   }
 
   Future<void> _stopDiscovery() async {
-    try {
-      await Nearby().stopDiscovery();
-      debugPrint('[MeshService] Discovery paused for battery duty-cycle sleep.');
-    } catch (e) {
-      debugPrint('[MeshService] stopDiscovery failed: $e');
-    }
+    await _transport.stopDiscovery();
   }
 
   void _onEndpointFound(String endpointId, String endpointName, String serviceId) {
-    debugPrint('[MeshService] Found peer: $endpointId ($endpointName)');
-    if (_connectedEndpoints.contains(endpointId)) return;
+    debugPrint('[Mesh:$localDeviceId] endpointFound: $endpointId / $endpointName');
 
-    // Automatic handshake initiation
-    Nearby().requestConnection(
-      _localDeviceId,
-      endpointId,
+    // Self-discovery ignore
+    if (endpointName == localDeviceId) {
+      debugPrint('[Mesh:$localDeviceId] Ignoring self-discovery echo: $endpointName');
+      return;
+    }
+
+    // Handshake deduplication & in-flight tracking
+    if (_connectedEndpoints.contains(endpointId)) {
+      debugPrint('[Mesh:$localDeviceId] Peer $endpointId is already connected. Ignoring.');
+      return;
+    }
+    if (_connectingEndpoints.contains(endpointId)) {
+      debugPrint('[Mesh:$localDeviceId] Connection to $endpointId is already in progress. Ignoring duplicate.');
+      return;
+    }
+
+    // Phase 6 Deterministic Tie-Breaker:
+    // Only the device with the lexicographically smaller device ID initiates the connection request.
+    // The device with the larger ID remains as advertiser and waits for the incoming connection.
+    if (localDeviceId.compareTo(endpointName) > 0) {
+      debugPrint('[Mesh:$localDeviceId] tie-breaker: waiting for peer $endpointId ($endpointName) to initiate');
+      return;
+    }
+
+    debugPrint('[Mesh:$localDeviceId] tie-breaker: initiating connection to $endpointId ($endpointName)');
+    _connectingEndpoints.add(endpointId);
+
+    _transport.requestConnection(
+      localDeviceId: localDeviceId,
+      endpointId: endpointId,
       onConnectionInitiated: _onConnectionInitiated,
       onConnectionResult: _onConnectionResult,
       onDisconnected: _onDisconnected,
     ).then((success) {
-      debugPrint('[MeshService] requestConnection result: $success');
+      debugPrint('[Mesh:$localDeviceId] requestConnection result: $success for $endpointId');
+      if (!success) {
+        _connectingEndpoints.remove(endpointId);
+      }
     }).catchError((e) {
-      debugPrint('[MeshService] requestConnection error: $e');
+      debugPrint('[Mesh:$localDeviceId] requestConnection error: $e for $endpointId');
+      _connectingEndpoints.remove(endpointId);
     });
   }
 
   void _onEndpointLost(String? endpointId) {
-    debugPrint('[MeshService] Lost peer: $endpointId');
+    debugPrint('[Mesh:$localDeviceId] Lost peer: $endpointId');
   }
 
-  void _onConnectionInitiated(String endpointId, ConnectionInfo info) {
-    debugPrint('[MeshService] Connection initiated with $endpointId (${info.endpointName}). Auto-accepting.');
-    Nearby().acceptConnection(
-      endpointId,
-      onPayLoadRecieved: (endId, payload) {
+  void _onConnectionInitiated(String endpointId, dynamic info) {
+    final name = info is ConnectionInfo ? info.endpointName : (info?.toString() ?? 'peer');
+    debugPrint('[Mesh:$localDeviceId] connection initiated with $endpointId ($name). Auto-accepting.');
+    _connectingEndpoints.add(endpointId);
+    _transport.acceptConnection(
+      endpointId: endpointId,
+      onPayloadReceived: (endId, payload) {
         _onPayloadReceived(endId, payload);
       },
     );
   }
 
   void _onConnectionResult(String endpointId, Status status) {
+    _connectingEndpoints.remove(endpointId);
+
     if (status == Status.CONNECTED) {
-      debugPrint('[MeshService] Connected to peer: $endpointId');
-      _connectedEndpoints.add(endpointId);
-      _status = MeshStatus.connected;
-      notifyListeners();
+      debugPrint('[Mesh] connection succeeded: $endpointId');
+      final isNew = _connectedEndpoints.add(endpointId);
+      debugPrint('[Mesh] connectedPeerCount=${_connectedEndpoints.length}');
+      if (isNew) {
+        notifyListeners();
+      }
 
       // Phase 5A: Notify peer connected listener and flush pending store-and-forward SOS messages
       _onPeerConnected?.call(endpointId);
       flushPendingMessages();
     } else {
-      debugPrint('[MeshService] Connection to $endpointId failed with status: $status');
-      _connectedEndpoints.remove(endpointId);
-      if (_connectedEndpoints.isEmpty) {
-        _status = MeshStatus.searching;
-      }
-      notifyListeners();
+      debugPrint('[Mesh] connection failed to $endpointId with status: $status');
+      // Critical Phase 6 rule:
+      // If endpointId is ALREADY in _connectedEndpoints, a failed duplicate request
+      // must NOT remove it. Only an actual disconnect callback removes connected endpoints.
+      debugPrint('[Mesh] connectedPeerCount=${_connectedEndpoints.length}');
     }
   }
 
   void _onDisconnected(String endpointId) {
-    debugPrint('[MeshService] Peer disconnected: $endpointId');
-    _connectedEndpoints.remove(endpointId);
-    if (_connectedEndpoints.isEmpty) {
-      _status = MeshStatus.searching;
-      // Re-trigger discovery and advertising to reconnect when back in range
-      startMesh();
-    } else {
+    debugPrint('[Mesh] endpoint disconnected: $endpointId');
+    _connectingEndpoints.remove(endpointId);
+    final wasRemoved = _connectedEndpoints.remove(endpointId);
+    debugPrint('[Mesh] connectedPeerCount=${_connectedEndpoints.length}');
+
+    if (wasRemoved) {
       notifyListeners();
     }
   }
 
-  void _onPayloadReceived(String endpointId, Payload payload) {
+  @visibleForTesting
+  void onEndpointFoundForTest(String endpointId, String endpointName, String serviceId) =>
+      _onEndpointFound(endpointId, endpointName, serviceId);
+
+  @visibleForTesting
+  void onConnectionResultForTest(String endpointId, Status status) =>
+      _onConnectionResult(endpointId, status);
+
+  @visibleForTesting
+  void onDisconnectedForTest(String endpointId) =>
+      _onDisconnected(endpointId);
+
+  @visibleForTesting
+  void onPayloadReceivedForTest(String endpointId, Payload payload) =>
+      _onPayloadReceived(endpointId, payload);
+
+  void _onPayloadReceived(String endpointId, Payload payload) async {
     if (payload.type != PayloadType.BYTES || payload.bytes == null) {
       debugPrint('[MeshService] Ignoring unsupported payload from $endpointId');
       return;
@@ -233,12 +300,199 @@ class MeshService extends ChangeNotifier {
     try {
       final jsonStr = utf8.decode(payload.bytes!);
       final map = jsonDecode(jsonStr) as Map<String, dynamic>;
-      final message = MessageModel.fromMap(map);
+      final type = map['type'] as String?;
 
-      debugPrint('[MeshService] Valid SOS payload received: ${message.id} from $endpointId (hop: ${message.hopCount})');
-      _onMessageReceived?.call(message, endpointId);
+      if (type == 'private_chat') {
+        final envelope = PrivateMessageEnvelope.fromMap(map);
+        await _handleIncomingPrivateEnvelope(envelope, endpointId);
+      } else if (type == 'private_ack') {
+        final ack = PrivateAckEnvelope.fromMap(map);
+        await _handleIncomingPrivateAck(ack, endpointId);
+      } else {
+        final message = MessageModel.fromMap(map);
+        debugPrint('[MeshService] Valid SOS payload received: ${message.id} from $endpointId (hop: ${message.hopCount})');
+        _onMessageReceived?.call(message, endpointId);
+      }
     } catch (e) {
       debugPrint('[MeshService] Error parsing incoming payload: $e');
+    }
+  }
+
+  /// Handles incoming private 1-to-1 encrypted message envelopes
+  Future<void> _handleIncomingPrivateEnvelope(
+    PrivateMessageEnvelope envelope,
+    String sourceEndpointId,
+  ) async {
+    // 1. Replay & deduplication check
+    final alreadySeen = await DatabaseService.instance.hasSeenPrivateMessageId(envelope.messageId);
+    if (alreadySeen) {
+      debugPrint('[MeshService] Private message ${envelope.messageId} already recorded. Dropping duplicate.');
+      return;
+    }
+
+    // 2. Expiry check (7 days policy)
+    final msgTime = DateTime.fromMillisecondsSinceEpoch(envelope.timestamp);
+    if (DateTime.now().difference(msgTime) > CryptoService.privateMessageExpiryHorizon) {
+      debugPrint('[MeshService] Private message ${envelope.messageId} is expired (>7 days). Dropping.');
+      return;
+    }
+
+    // 3. Check if this device is the intended recipient
+    final isForThisDevice = envelope.recipientDeviceId == localDeviceId ||
+        (CryptoService.instance.isInitialized && envelope.recipientDeviceId == CryptoService.instance.derivedDeviceId);
+
+    if (isForThisDevice) {
+      debugPrint('[MeshService] Private message ${envelope.messageId} addressed to local device.');
+
+      // Verify Ed25519 signature
+      final validSig = await CryptoService.instance.verifyPrivateEnvelopeSignature(envelope);
+      if (!validSig) {
+        debugPrint('[MeshService] Invalid signature on private message ${envelope.messageId}. Dropping.');
+        return;
+      }
+
+      // Check contact and detect key changes
+      final contact = await DatabaseService.instance.getContact(envelope.senderDeviceId);
+      if (contact != null) {
+        if (contact.signingPublicKey != envelope.senderEd25519Pub ||
+            contact.encryptionPublicKey != envelope.senderX25519Pub) {
+          debugPrint('[MeshService] SECURITY ALERT: Key mismatch detected for ${envelope.senderDeviceId}!');
+          await DatabaseService.instance.updateContactTrustStatus(
+            envelope.senderDeviceId,
+            ContactTrustStatus.keyChanged,
+          );
+        }
+      }
+
+      // Decrypt locally
+      String? plaintext;
+      try {
+        plaintext = await CryptoService.instance.decryptPrivateMessage(envelope: envelope);
+      } catch (e) {
+        debugPrint('[MeshService] Decryption failed for private message ${envelope.messageId}: $e');
+        return;
+      }
+
+      // Store in SQLite
+      final model = PrivateMessageModel(
+        messageId: envelope.messageId,
+        conversationId: envelope.conversationId,
+        senderDeviceId: envelope.senderDeviceId,
+        recipientDeviceId: envelope.recipientDeviceId,
+        plaintextBody: plaintext,
+        ciphertext: envelope.ciphertext,
+        nonce: envelope.nonce,
+        authTag: envelope.authTag,
+        senderX25519Pub: envelope.senderX25519Pub,
+        senderEd25519Pub: envelope.senderEd25519Pub,
+        signature: envelope.signature,
+        status: PrivateMessageStatus.received,
+        timestamp: envelope.timestamp,
+        expiresAt: envelope.timestamp + CryptoService.privateMessageExpiryHorizon.inMilliseconds,
+        isOutgoing: false,
+        acknowledged: false,
+      );
+      await DatabaseService.instance.savePrivateMessage(model);
+
+      // Send delivery ACK back to sender
+      try {
+        final ack = await CryptoService.instance.signAck(
+          ackMessageId: envelope.messageId,
+          originalSenderDeviceId: envelope.senderDeviceId,
+        );
+        await broadcastAck(ack);
+      } catch (e) {
+        debugPrint('[MeshService] Could not send delivery ACK: $e');
+      }
+
+      // Trigger UI callback
+      _onPrivateMessageReceived?.call(envelope, plaintext);
+    } else {
+      // Intermediate Relay Node: Forward without decryption
+      if (envelope.hopCount < maxHops) {
+        envelope.hopCount += 1;
+        debugPrint('[MeshService] Relaying private message ${envelope.messageId} (hop ${envelope.hopCount}) for ${envelope.recipientDeviceId}');
+        await broadcastPrivateEnvelope(envelope, excludeEndpointId: sourceEndpointId);
+      } else {
+        debugPrint('[MeshService] Private message ${envelope.messageId} exceeded max hops ($maxHops). Dropping.');
+      }
+    }
+  }
+
+  /// Handles incoming delivery acknowledgment envelopes
+  Future<void> _handleIncomingPrivateAck(
+    PrivateAckEnvelope ack,
+    String sourceEndpointId,
+  ) async {
+    final isForThisDevice = ack.recipientDeviceId == localDeviceId ||
+        (CryptoService.instance.isInitialized && ack.recipientDeviceId == CryptoService.instance.derivedDeviceId);
+
+    if (isForThisDevice) {
+      debugPrint('[MeshService] Delivery ACK received for message: ${ack.ackMessageId}');
+      await DatabaseService.instance.markPrivateMessageDelivered(ack.ackMessageId);
+      _onAckReceived?.call(ack);
+    } else {
+      // Relay ACK along connected peers
+      debugPrint('[MeshService] Relaying delivery ACK for ${ack.ackMessageId}');
+      await broadcastAck(ack, excludeEndpointId: sourceEndpointId);
+    }
+  }
+
+  /// Broadcasts a private encrypted message envelope to connected peers
+  Future<int> broadcastPrivateEnvelope(
+    PrivateMessageEnvelope envelope, {
+    String? excludeEndpointId,
+  }) async {
+    if (_connectedEndpoints.isEmpty) {
+      debugPrint('[MeshService] No connected peers to broadcast private message to.');
+      return 0;
+    }
+
+    try {
+      final jsonStr = envelope.toJson();
+      final bytes = Uint8List.fromList(utf8.encode(jsonStr));
+      int sentCount = 0;
+
+      for (final endpointId in _connectedEndpoints) {
+        if (excludeEndpointId != null && endpointId == excludeEndpointId) {
+          continue;
+        }
+        await _transport.sendBytesPayload(endpointId, bytes);
+        sentCount++;
+      }
+
+      debugPrint('[MeshService] Broadcasted private message ${envelope.messageId} to $sentCount peer(s).');
+      return sentCount;
+    } catch (e) {
+      debugPrint('[MeshService] Error broadcasting private envelope: $e');
+      return 0;
+    }
+  }
+
+  /// Broadcasts a delivery acknowledgment envelope to connected peers
+  Future<int> broadcastAck(
+    PrivateAckEnvelope ack, {
+    String? excludeEndpointId,
+  }) async {
+    if (_connectedEndpoints.isEmpty) return 0;
+
+    try {
+      final jsonStr = ack.toJson();
+      final bytes = Uint8List.fromList(utf8.encode(jsonStr));
+      int sentCount = 0;
+
+      for (final endpointId in _connectedEndpoints) {
+        if (excludeEndpointId != null && endpointId == excludeEndpointId) {
+          continue;
+        }
+        await _transport.sendBytesPayload(endpointId, bytes);
+        sentCount++;
+      }
+
+      return sentCount;
+    } catch (e) {
+      debugPrint('[MeshService] Error broadcasting ACK: $e');
+      return 0;
     }
   }
 
@@ -259,7 +513,7 @@ class MeshService extends ChangeNotifier {
           debugPrint('[MeshService] Skipping echo back to source endpoint: $endpointId');
           continue;
         }
-        await Nearby().sendBytesPayload(endpointId, bytes);
+        await _transport.sendBytesPayload(endpointId, bytes);
         sentCount++;
         debugPrint('[MeshService] Sent SOS ${message.id} (hop: ${message.hopCount}) to $endpointId');
       }
@@ -271,7 +525,34 @@ class MeshService extends ChangeNotifier {
     }
   }
 
-  /// Automatically flushes pending offline SOS messages when a peer connects (Phase 5A Store-and-Forward)
+  /// Flushes pending outgoing private messages when a peer connects
+  Future<int> flushPendingPrivateMessages() async {
+    if (_connectedEndpoints.isEmpty) return 0;
+
+    try {
+      final pending = await DatabaseService.instance.getPendingPrivateMessages();
+      if (pending.isEmpty) return 0;
+
+      debugPrint('[MeshService] Flushing ${pending.length} pending private message(s)...');
+      int transmittedCount = 0;
+
+      for (final msg in pending) {
+        final envelope = msg.toEnvelope();
+        final sent = await broadcastPrivateEnvelope(envelope);
+        if (sent > 0) {
+          await DatabaseService.instance.updatePrivateMessageStatus(msg.messageId, PrivateMessageStatus.sent);
+          transmittedCount++;
+        }
+      }
+
+      return transmittedCount;
+    } catch (e) {
+      debugPrint('[MeshService] Error flushing pending private messages: $e');
+      return 0;
+    }
+  }
+
+  /// Automatically flushes pending offline SOS and private messages when a peer connects (Store-and-Forward)
   Future<int> flushPendingMessages() async {
     if (_connectedEndpoints.isEmpty) {
       debugPrint('[MeshService] No connected peers to flush pending messages to.');
@@ -282,6 +563,9 @@ class MeshService extends ChangeNotifier {
       if (_pendingMessageFlusher != null) {
         return await _pendingMessageFlusher!.call();
       }
+
+      // Flush private messages
+      await flushPendingPrivateMessages();
 
       final pending = await DatabaseService.instance.getPendingMeshMessages();
       if (pending.isEmpty) {
@@ -320,8 +604,8 @@ class MeshService extends ChangeNotifier {
 
   /// Clean shutdown of mesh operations and Android Foreground Service.
   Future<void> stopMesh() async {
-    if (_status == MeshStatus.idle && _connectedEndpoints.isEmpty) {
-      debugPrint('[MeshService] Mesh already stopped.');
+    if (!_isMeshActive && _connectedEndpoints.isEmpty) {
+      debugPrint('[Mesh] Mesh already stopped.');
       return;
     }
 
@@ -329,23 +613,28 @@ class MeshService extends ChangeNotifier {
     BatteryDutyCycleManager.instance.stopScheduler();
 
     try {
-      await Nearby().stopAdvertising();
-      await Nearby().stopDiscovery();
-      await Nearby().stopAllEndpoints();
+      await _transport.stopAdvertising();
+      await _transport.stopDiscovery();
+      await _transport.stopAllEndpoints();
       _connectedEndpoints.clear();
-      _status = MeshStatus.idle;
+      _connectingEndpoints.clear();
+      _isMeshActive = false;
       notifyListeners();
     } catch (e) {
-      debugPrint('[MeshService] Error stopping Nearby: $e');
+      debugPrint('[Mesh] Error stopping transport: $e');
+      _connectedEndpoints.clear();
+      _connectingEndpoints.clear();
+      _isMeshActive = false;
+      notifyListeners();
     }
 
     // Phase 5B: Stop native Android Foreground Service
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
       try {
         await _backgroundChannel.invokeMethod('stopForegroundService');
-        debugPrint('[MeshService] Native Android foreground service stopped.');
+        debugPrint('[Mesh] Native Android foreground service stopped.');
       } catch (e) {
-        debugPrint('[MeshService] Notice: Could not stop native background service: $e');
+        debugPrint('[Mesh] Notice: Could not stop native background service: $e');
       }
     }
   }

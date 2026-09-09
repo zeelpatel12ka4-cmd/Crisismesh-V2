@@ -3,11 +3,13 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:uuid/uuid.dart';
 import '../core/battery/battery_duty_cycle_manager.dart';
+import '../core/crypto/crypto_service.dart';
 import '../core/database/database_service.dart';
 import '../core/mesh/mesh_service.dart';
 import '../core/models/message_model.dart';
 import '../core/sync/sync_service.dart';
 import '../core/triage/severity_engine.dart';
+import 'contacts/contacts_screen.dart';
 
 class SosScreen extends StatefulWidget {
   const SosScreen({super.key});
@@ -19,7 +21,7 @@ class SosScreen extends StatefulWidget {
 class _SosScreenState extends State<SosScreen> {
   final _uuid = const Uuid();
   final _descriptionController = TextEditingController();
-  final String _deviceId = 'DEV-${const Uuid().v4().substring(0, 8)}';
+  String get _deviceId => MeshService.instance.localDeviceId;
 
   String _selectedCategory = 'medical';
   double? _latitude;
@@ -136,18 +138,57 @@ class _SosScreenState extends State<SosScreen> {
     // 2. Mark as seen immediately in SQLite
     await DatabaseService.instance.saveSeenMessageId(incomingMessage.id);
 
-    // 3. Increment hop count
-    final relayedMessage = incomingMessage.copyWith(
+    // 3. Phase 7 Cryptographic & Authenticity Evaluation
+    final authenticity = await CryptoService.instance.evaluateAuthenticity(incomingMessage);
+    debugPrint('[SosScreen] Incoming message ${incomingMessage.id} authenticity: $authenticity');
+
+    final evaluatedMessage = incomingMessage.copyWith(
+      authenticityStatus: authenticity,
+    );
+
+    // Check if packet is invalid or tampered
+    if (authenticity == AuthenticityStatus.invalidSignature) {
+      debugPrint('[SosScreen] REJECTING FORWARDING: Message ${incomingMessage.id} signature is INVALID / TAMPERED.');
+      await DatabaseService.instance.saveMessage(evaluatedMessage);
+      await _loadMessageHistory();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '⚠️ TAMPERED SOS DETECTED: Invalid signature on report from ${incomingMessage.senderId}. Stored locally, NOT forwarded.',
+            ),
+            backgroundColor: const Color(0xFFDC2626),
+            duration: const Duration(seconds: 5),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+      return; // Do not relay tampered messages
+    }
+
+    // Check if packet is stale, future-clock, or rate-limited
+    if (authenticity == AuthenticityStatus.stale ||
+        authenticity == AuthenticityStatus.futureClock ||
+        authenticity == AuthenticityStatus.rateLimited ||
+        authenticity == AuthenticityStatus.untrustedKeyMismatch) {
+      debugPrint('[SosScreen] REJECTING FORWARDING: Message ${incomingMessage.id} failed policy ($authenticity). Stored locally only.');
+      await DatabaseService.instance.saveMessage(evaluatedMessage);
+      await _loadMessageHistory();
+      return; // Do not relay expired, future, or flooded packets
+    }
+
+    // 4. Increment hop count for legitimate verified message
+    final relayedMessage = evaluatedMessage.copyWith(
       hopCount: incomingMessage.hopCount + 1,
     );
 
-    // 4. Save to local SQLite database
+    // 5. Save to local SQLite database
     await DatabaseService.instance.saveMessage(relayedMessage);
 
-    // 5. Refresh local UI history
+    // 6. Refresh local UI history
     await _loadMessageHistory();
 
-    // 6. Multi-Hop Forwarding check: forward if hopCount < 7, excluding the source endpoint
+    // 7. Multi-Hop Forwarding check: forward if hopCount < 7, excluding the source endpoint
     int forwardedPeers = 0;
     if (relayedMessage.hopCount < MeshService.maxHops) {
       debugPrint('[SosScreen] Forwarding message ${relayedMessage.id} (hop: ${relayedMessage.hopCount}) excluding source: $sourceEndpointId');
@@ -159,7 +200,7 @@ class _SosScreenState extends State<SosScreen> {
       debugPrint('[SosScreen] Max hop limit reached (${relayedMessage.hopCount} >= ${MeshService.maxHops}). Stored locally, halting forwarding.');
     }
 
-    // 7. Phase 3 Cloud Bridge Sync: If this device has internet access, automatically sync to Firestore
+    // 8. Phase 3 Cloud Bridge Sync: If this device has internet access, automatically sync to Firestore
     SyncService.instance.checkConnectivityAndSync();
 
     if (mounted) {
@@ -318,18 +359,40 @@ class _SosScreenState extends State<SosScreen> {
     final bool hasPeers = MeshService.instance.isConnected;
     final initialMeshStatus = hasPeers ? MeshDeliveryStatus.sending : MeshDeliveryStatus.pending;
 
+    // Phase 7: Cryptographic signing with Ed25519
+    final messageId = _uuid.v4();
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    String? signature;
+    try {
+      signature = await CryptoService.instance.signSos(
+        messageId: messageId,
+        senderId: _deviceId,
+        timestamp: timestamp,
+        needType: _selectedCategory,
+        lat: finalLat,
+        lng: finalLng,
+        payload: description,
+      );
+    } catch (e) {
+      debugPrint('[_broadcastSos] Error signing SOS: $e');
+    }
+
     final sosMessage = MessageModel(
-      id: _uuid.v4(),
+      id: messageId,
       type: 'broadcast',
       senderId: _deviceId,
       payload: description,
       needType: _selectedCategory,
       lat: finalLat,
       lng: finalLng,
-      timestamp: DateTime.now().millisecondsSinceEpoch,
+      timestamp: timestamp,
       hopCount: 0,
       priorityTier: triageResult.tier,
       priorityScore: triageResult.score,
+      signature: signature,
+      publicKey: CryptoService.instance.publicKeyBase64,
+      signatureVersion: CryptoService.currentSignatureVersion,
+      authenticityStatus: AuthenticityStatus.verified,
       synced: false,
       meshDeliveryStatus: initialMeshStatus,
     );
@@ -455,28 +518,42 @@ class _SosScreenState extends State<SosScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
       appBar: AppBar(
-        titleSpacing: 16,
-        title: const Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.cell_tower,
-              color: Color(0xFFDC2626),
-              size: 20,
-            ),
-            SizedBox(width: 8),
-            Text(
-              'Crisis Mesh',
-              style: TextStyle(
-                color: Color(0xFF0F172A),
-                fontWeight: FontWeight.w800,
-                fontSize: 18,
-                letterSpacing: -0.3,
+        titleSpacing: 8,
+        title: const FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.cell_tower,
+                color: Color(0xFFDC2626),
+                size: 20,
               ),
-            ),
-          ],
+              SizedBox(width: 6),
+              Text(
+                'Crisis Mesh',
+                style: TextStyle(
+                  color: Color(0xFF0F172A),
+                  fontWeight: FontWeight.w800,
+                  fontSize: 18,
+                  letterSpacing: -0.3,
+                ),
+              ),
+            ],
+          ),
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.lock_person_outlined, color: Color(0xFF0F766E)),
+            tooltip: 'Private E2EE Chat & Contacts',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const ContactsScreen()),
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.refresh_rounded),
             onPressed: () {
@@ -723,7 +800,7 @@ class _SosScreenState extends State<SosScreen> {
         badgeBg = const Color(0xFFF0FDF4);
         borderColor = const Color(0xFFBBF7D0);
         textColor = const Color(0xFF15803D);
-        titleText = '🟢 Emergency Mesh Active';
+        titleText = '🟢 Emergency Mesh Active — Searching';
         subtitleText = 'Monitoring nearby peers • Ready to relay in background';
         indicator = const SizedBox(
           width: 14,
@@ -807,7 +884,7 @@ class _SosScreenState extends State<SosScreen> {
     final Widget indicator;
 
     switch (sync.status) {
-      case SyncStatus.synced:
+      case SyncStatus.connected:
         badgeBg = const Color(0xFFF0FDF4);
         borderColor = const Color(0xFFBBF7D0);
         textColor = const Color(0xFF15803D);
@@ -819,7 +896,7 @@ class _SosScreenState extends State<SosScreen> {
         badgeBg = const Color(0xFFEFF6FF);
         borderColor = const Color(0xFFBFDBFE);
         textColor = const Color(0xFF1D4ED8);
-        titleText = '🔄 Synchronizing with Cloud';
+        titleText = '🔄 Synchronizing with Cloud...';
         subtitleText = 'Uploading pending offline SOS reports to Firestore...';
         indicator = const SizedBox(
           width: 14,
@@ -830,22 +907,55 @@ class _SosScreenState extends State<SosScreen> {
           ),
         );
         break;
-      case SyncStatus.checking:
+      case SyncStatus.firestorePermissionDenied:
+        badgeBg = const Color(0xFFFEF2F2);
+        borderColor = const Color(0xFFFECACA);
+        textColor = const Color(0xFFDC2626);
+        titleText = '⛔ Firestore Permission Denied';
+        subtitleText = 'Security rules rejected /sos_reports. Check Firestore permissions.';
+        indicator = TextButton(
+          onPressed: _manualSync,
+          style: TextButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            minimumSize: Size.zero,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          child: const Text('RETRY', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFFDC2626))),
+        );
+        break;
+      case SyncStatus.networkOffline:
+        badgeBg = const Color(0xFFF8FAFC);
+        borderColor = const Color(0xFFE2E8F0);
+        textColor = const Color(0xFF475569);
+        titleText = '📡 Offline — No Internet';
+        subtitleText = 'No network interface • SOS queued in local database & mesh';
+        indicator = TextButton(
+          onPressed: _manualSync,
+          style: TextButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            minimumSize: Size.zero,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          child: const Text('SYNC', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+        );
+        break;
+      case SyncStatus.firestoreUnavailable:
         badgeBg = const Color(0xFFFFFBEB);
         borderColor = const Color(0xFFFDE68A);
         textColor = const Color(0xFFB45309);
-        titleText = '🟡 Checking Internet Reachability';
-        subtitleText = 'Testing Firestore connection on available network interface';
-        indicator = const SizedBox(
-          width: 14,
-          height: 14,
-          child: CircularProgressIndicator(
-            strokeWidth: 2,
-            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFB45309)),
+        titleText = '⚠️ Firestore Unavailable';
+        subtitleText = 'Network available but cannot reach Firebase servers';
+        indicator = TextButton(
+          onPressed: _manualSync,
+          style: TextButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            minimumSize: Size.zero,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           ),
+          child: const Text('RETRY', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFFB45309))),
         );
         break;
-      case SyncStatus.error:
+      case SyncStatus.syncError:
         badgeBg = const Color(0xFFFEF2F2);
         borderColor = const Color(0xFFFECACA);
         textColor = const Color(0xFFDC2626);
@@ -858,23 +968,7 @@ class _SosScreenState extends State<SosScreen> {
             minimumSize: Size.zero,
             tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           ),
-          child: const Text('RETRY', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-        );
-        break;
-      case SyncStatus.offline:
-        badgeBg = const Color(0xFFF8FAFC);
-        borderColor = const Color(0xFFE2E8F0);
-        textColor = const Color(0xFF475569);
-        titleText = '📡 Offline Bridge Mode';
-        subtitleText = 'No internet • SOS reports queued for cloud auto-sync';
-        indicator = TextButton(
-          onPressed: _manualSync,
-          style: TextButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            minimumSize: Size.zero,
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-          child: const Text('SYNC', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+          child: const Text('RETRY', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFFDC2626))),
         );
         break;
     }
@@ -1597,6 +1691,61 @@ class _SosScreenState extends State<SosScreen> {
                       ),
                     ),
 
+                  // Phase 7 Authenticity Badge
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: msg.authenticityStatus == AuthenticityStatus.verified
+                          ? const Color(0xFFF0FDF4)
+                          : (msg.authenticityStatus == AuthenticityStatus.invalidSignature
+                              ? const Color(0xFFFEF2F2)
+                              : const Color(0xFFF8FAFC)),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(
+                        color: msg.authenticityStatus == AuthenticityStatus.verified
+                            ? const Color(0xFFBBF7D0)
+                            : (msg.authenticityStatus == AuthenticityStatus.invalidSignature
+                                ? const Color(0xFFFECACA)
+                                : const Color(0xFFE2E8F0)),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          msg.authenticityStatus == AuthenticityStatus.verified
+                              ? Icons.verified_rounded
+                              : (msg.authenticityStatus == AuthenticityStatus.invalidSignature
+                                  ? Icons.gpp_bad_rounded
+                                  : Icons.shield_outlined),
+                          size: 11,
+                          color: msg.authenticityStatus == AuthenticityStatus.verified
+                              ? const Color(0xFF15803D)
+                              : (msg.authenticityStatus == AuthenticityStatus.invalidSignature
+                                  ? const Color(0xFFDC2626)
+                                  : const Color(0xFF64748B)),
+                        ),
+                        const SizedBox(width: 3),
+                        Text(
+                          msg.authenticityStatus == AuthenticityStatus.verified
+                              ? 'Verified'
+                              : (msg.authenticityStatus == AuthenticityStatus.invalidSignature
+                                  ? 'Tampered'
+                                  : AuthenticityStatus.badgeText(msg.authenticityStatus)),
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            color: msg.authenticityStatus == AuthenticityStatus.verified
+                                ? const Color(0xFF15803D)
+                                : (msg.authenticityStatus == AuthenticityStatus.invalidSignature
+                                    ? const Color(0xFFDC2626)
+                                    : const Color(0xFF64748B)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
                   // Phase 3 Cloud Sync Status Badge (Cloud Synced vs Mesh Only)
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -1714,14 +1863,20 @@ class _SosScreenState extends State<SosScreen> {
     final String msg;
     final Color bg;
 
-    if (status == SyncStatus.synced) {
+    if (status == SyncStatus.connected) {
       msg = syncedCount > 0
           ? 'Cloud Sync Complete • $syncedCount report(s) uploaded to Firestore'
           : 'Cloud Sync • All local reports are up to date';
       bg = const Color(0xFF15803D);
-    } else if (status == SyncStatus.offline) {
-      msg = 'Device Offline • Reports preserved in local database and mesh';
+    } else if (status == SyncStatus.firestorePermissionDenied) {
+      msg = 'Firestore Permission Denied • Security rules rejected /sos_reports';
+      bg = const Color(0xFFDC2626);
+    } else if (status == SyncStatus.networkOffline) {
+      msg = 'Offline — No Internet • Reports preserved in local database and mesh';
       bg = const Color(0xFF1E293B);
+    } else if (status == SyncStatus.firestoreUnavailable) {
+      msg = 'Firestore Unavailable • Could not establish session with Firebase';
+      bg = const Color(0xFFD97706);
     } else {
       msg = 'Sync Note: ${SyncService.instance.lastError ?? "Firestore unreachable"}';
       bg = const Color(0xFFDC2626);

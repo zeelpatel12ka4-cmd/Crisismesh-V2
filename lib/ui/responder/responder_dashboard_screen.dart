@@ -86,9 +86,11 @@ class _ResponderDashboardScreenState extends State<ResponderDashboardScreen> {
               onLogout: () => authSession.logout(),
             ),
 
-            // Offline Warning Ribbon (if offline)
+            // Connection Warning Ribbon (if not connected)
             if (responderService.isOffline)
               ResponderOfflineBanner(
+                state: responderService.connectionState,
+                errorMessage: responderService.errorMessage,
                 onRetry: () => responderService.init(provider: widget.customProvider),
               ),
 

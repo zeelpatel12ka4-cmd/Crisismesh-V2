@@ -42,6 +42,9 @@ class IncidentModel {
   final String priorityTier;
   final int priorityScore;
   final String? signature;
+  final String? publicKey;
+  final String? signatureVersion;
+  final String authenticityStatus;
   final bool synced;
   final int? syncedAt;
   final String? bridgeDeviceId;
@@ -68,6 +71,9 @@ class IncidentModel {
     required this.priorityTier,
     required this.priorityScore,
     this.signature,
+    this.publicKey,
+    this.signatureVersion = '1',
+    this.authenticityStatus = 'unverified',
     this.synced = true,
     this.syncedAt,
     this.bridgeDeviceId,
@@ -156,6 +162,10 @@ class IncidentModel {
       priorityTier: rawTier,
       priorityScore: parsedScore,
       signature: map['signature']?.toString(),
+      publicKey: (map['public_key'] ?? map['publicKey'])?.toString(),
+      signatureVersion: (map['signature_version'] ?? map['signatureVersion'])?.toString() ?? '1',
+      authenticityStatus: (map['authenticity_status'] ?? map['authenticityStatus'])?.toString() ??
+          (map['signature'] != null ? 'verified' : 'unverified'),
       synced: isSynced,
       syncedAt: _parseTimestamp(map['synced_at'] ?? map['syncedAt']),
       bridgeDeviceId: (map['bridge_device_id'] ?? map['bridgeDeviceId'])?.toString(),
@@ -184,6 +194,9 @@ class IncidentModel {
       priorityTier: message.priorityTier,
       priorityScore: message.priorityScore,
       signature: message.signature,
+      publicKey: message.publicKey,
+      signatureVersion: message.signatureVersion,
+      authenticityStatus: message.authenticityStatus,
       synced: message.synced,
       status: status ?? IncidentStatus.open,
       assignedTo: assignedTo,
@@ -207,6 +220,9 @@ class IncidentModel {
       'priority_tier': priorityTier,
       'priority_score': priorityScore,
       'signature': signature,
+      'public_key': publicKey,
+      'signature_version': signatureVersion,
+      'authenticity_status': authenticityStatus,
       'synced': synced,
       'synced_at': syncedAt ?? DateTime.now().millisecondsSinceEpoch,
       'bridge_device_id': bridgeDeviceId,
@@ -245,6 +261,9 @@ class IncidentModel {
     String? priorityTier,
     int? priorityScore,
     String? signature,
+    String? publicKey,
+    String? signatureVersion,
+    String? authenticityStatus,
     bool? synced,
     int? syncedAt,
     String? bridgeDeviceId,
@@ -269,6 +288,9 @@ class IncidentModel {
       priorityTier: priorityTier ?? this.priorityTier,
       priorityScore: priorityScore ?? this.priorityScore,
       signature: signature ?? this.signature,
+      publicKey: publicKey ?? this.publicKey,
+      signatureVersion: signatureVersion ?? this.signatureVersion,
+      authenticityStatus: authenticityStatus ?? this.authenticityStatus,
       synced: synced ?? this.synced,
       syncedAt: syncedAt ?? this.syncedAt,
       bridgeDeviceId: bridgeDeviceId ?? this.bridgeDeviceId,

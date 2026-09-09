@@ -48,6 +48,9 @@ class MessageModel {
   final String priorityTier;
   final int priorityScore;
   final String? signature;
+  final String? publicKey;
+  final String? signatureVersion;
+  final String authenticityStatus; // 'verified', 'invalid_signature', 'stale', 'future_clock', 'replayed', 'untrusted_key_mismatch', 'rate_limited', 'unverified'
   final bool synced;
   final String meshDeliveryStatus; // 'pending', 'sending', 'transmitted_to_peer'
 
@@ -66,6 +69,9 @@ class MessageModel {
     required this.priorityTier,
     required this.priorityScore,
     this.signature,
+    this.publicKey,
+    this.signatureVersion = '1',
+    this.authenticityStatus = 'unverified',
     this.synced = false,
     this.meshDeliveryStatus = MeshDeliveryStatus.transmittedToPeer,
   });
@@ -95,6 +101,9 @@ class MessageModel {
       priorityTier: map['priority_tier'] as String? ?? 'Low',
       priorityScore: map['priority_score'] != null ? (map['priority_score'] as num).toInt() : 1,
       signature: map['signature'] as String?,
+      publicKey: map['public_key'] as String?,
+      signatureVersion: map['signature_version'] as String? ?? '1',
+      authenticityStatus: map['authenticity_status'] as String? ?? (map['signature'] != null ? 'verified' : 'unverified'),
       synced: isSynced,
       meshDeliveryStatus: parsedMeshStatus,
     );
@@ -117,6 +126,9 @@ class MessageModel {
       'priority_tier': priorityTier,
       'priority_score': priorityScore,
       'signature': signature,
+      'public_key': publicKey,
+      'signature_version': signatureVersion,
+      'authenticity_status': authenticityStatus,
       'synced': synced ? 1 : 0,
       'mesh_delivery_status': meshDeliveryStatus,
     };
@@ -139,6 +151,9 @@ class MessageModel {
       'priority_tier': priorityTier,
       'priority_score': priorityScore,
       'signature': signature,
+      'public_key': publicKey,
+      'signature_version': signatureVersion,
+      'authenticity_status': authenticityStatus,
       'synced': true,
       'synced_at': DateTime.now().millisecondsSinceEpoch,
       'bridge_device_id': bridgeDeviceId,
@@ -162,6 +177,9 @@ class MessageModel {
     String? priorityTier,
     int? priorityScore,
     String? signature,
+    String? publicKey,
+    String? signatureVersion,
+    String? authenticityStatus,
     bool? synced,
     String? meshDeliveryStatus,
   }) {
@@ -180,6 +198,9 @@ class MessageModel {
       priorityTier: priorityTier ?? this.priorityTier,
       priorityScore: priorityScore ?? this.priorityScore,
       signature: signature ?? this.signature,
+      publicKey: publicKey ?? this.publicKey,
+      signatureVersion: signatureVersion ?? this.signatureVersion,
+      authenticityStatus: authenticityStatus ?? this.authenticityStatus,
       synced: synced ?? this.synced,
       meshDeliveryStatus: meshDeliveryStatus ?? this.meshDeliveryStatus,
     );
