@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:nearby_connections/nearby_connections.dart';
 import 'package:uuid/uuid.dart';
 import '../battery/battery_duty_cycle_manager.dart';
 import '../database/database_service.dart';
@@ -10,8 +9,12 @@ import '../models/contact_model.dart';
 import '../models/private_message_model.dart';
 import '../crypto/crypto_service.dart';
 import 'transport/mesh_transport.dart';
-import 'transport/android_mesh_transport.dart';
-import 'transport/ios_mesh_transport.dart';
+import 'transport/mesh_transport_factory.dart';
+
+// Conditional import: Status is only available on non-web (nearby_connections package).
+// On Web, this import resolves to a stub so the code compiles safely.
+import 'nearby_status_stub.dart'
+    if (dart.library.io) 'nearby_status_io.dart';
 
 enum MeshStatus {
   idle,
@@ -28,9 +31,7 @@ class MeshService extends ChangeNotifier {
   static const int maxHops = 7;
   static const MethodChannel _backgroundChannel = MethodChannel('com.crisismesh.app/background_service');
 
-  MeshTransport _transport = defaultTargetPlatform == TargetPlatform.iOS
-      ? IosMeshTransport()
-      : AndroidMeshTransport();
+  MeshTransport _transport = createDefaultMeshTransport();
 
   /// Allows test injection of mock or custom mesh transport
   @visibleForTesting
@@ -230,7 +231,15 @@ class MeshService extends ChangeNotifier {
   }
 
   void _onConnectionInitiated(String endpointId, dynamic info) {
-    final name = info is ConnectionInfo ? info.endpointName : (info?.toString() ?? 'peer');
+    // ConnectionInfo is nearby_connections-specific (Android only).
+    // Use a safe dynamic accessor: try the known field name, fall back to toString().
+    String name;
+    try {
+      // On Android with real ConnectionInfo, this will work via dynamic dispatch.
+      name = (info as dynamic).endpointName as String? ?? info?.toString() ?? 'peer';
+    } catch (_) {
+      name = info?.toString() ?? 'peer';
+    }
     debugPrint('[Mesh:$localDeviceId] connection initiated with $endpointId ($name). Auto-accepting.');
     _connectingEndpoints.add(endpointId);
     _transport.acceptConnection(
@@ -241,10 +250,16 @@ class MeshService extends ChangeNotifier {
     );
   }
 
-  void _onConnectionResult(String endpointId, Status status) {
+  // Accept `dynamic` to match MeshTransport interface (nearby_connections Status is
+  // Android-only; on Web this callback is never fired, but must compile).
+  void _onConnectionResult(String endpointId, dynamic status) {
     _connectingEndpoints.remove(endpointId);
 
-    if (status == Status.CONNECTED) {
+    // Use NearbyStatusHelper (resolves to real Status on Android, stub on Web)
+    // so this check is safe on all platforms.
+    final connected = NearbyStatusHelper.isConnected(status);
+
+    if (connected) {
       debugPrint('[Mesh] connection succeeded: $endpointId');
       final isNew = _connectedEndpoints.add(endpointId);
       debugPrint('[Mesh] connectedPeerCount=${_connectedEndpoints.length}');
@@ -280,7 +295,7 @@ class MeshService extends ChangeNotifier {
       _onEndpointFound(endpointId, endpointName, serviceId);
 
   @visibleForTesting
-  void onConnectionResultForTest(String endpointId, Status status) =>
+  void onConnectionResultForTest(String endpointId, dynamic status) =>
       _onConnectionResult(endpointId, status);
 
   @visibleForTesting
@@ -288,17 +303,23 @@ class MeshService extends ChangeNotifier {
       _onDisconnected(endpointId);
 
   @visibleForTesting
-  void onPayloadReceivedForTest(String endpointId, Payload payload) =>
+  void onPayloadReceivedForTest(String endpointId, dynamic payload) =>
       _onPayloadReceived(endpointId, payload);
 
-  void _onPayloadReceived(String endpointId, Payload payload) async {
-    if (payload.type != PayloadType.BYTES || payload.bytes == null) {
+  void _onPayloadReceived(String endpointId, dynamic payload) async {
+    // Payload is a nearby_connections Android type. Access via dynamic dispatch.
+    // On Web this callback is never invoked (WebMeshTransport is a no-op).
+    final dynamic payloadType = NearbyPayloadHelper.getType(payload);
+    final bool isBytes = NearbyPayloadHelper.isBytes(payloadType);
+    final List<int>? bytes = NearbyPayloadHelper.getBytes(payload);
+
+    if (!isBytes || bytes == null) {
       debugPrint('[MeshService] Ignoring unsupported payload from $endpointId');
       return;
     }
 
     try {
-      final jsonStr = utf8.decode(payload.bytes!);
+      final jsonStr = utf8.decode(bytes);
       final map = jsonDecode(jsonStr) as Map<String, dynamic>;
       final type = map['type'] as String?;
 
